@@ -1,0 +1,46 @@
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{A1E00003-0000-4000-8000-00000000A003}</ProjectGuid>
+    <RootNamespace>winckpt</RootNamespace>
+    <TargetName>winckpt</TargetName>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+
+  <ItemGroup>
+    <ClCompile Include="winckpt.c" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ClInclude Include="$(RepoRoot)include\winckpt_api.h" />
+    <ClInclude Include="$(RepoRoot)include\loader.h" />
+    <ClInclude Include="$(RepoRoot)include\ckpt_format.h" />
+    <ClInclude Include="$(RepoRoot)include\log.h" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="$(RepoRoot)src\checkpoint\winckpt_api.vcxproj" />
+    <ProjectReference Include="$(RepoRoot)src\loader\loader.vcxproj" />
+  </ItemGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+
+</Project>
