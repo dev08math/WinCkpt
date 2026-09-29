@@ -14,6 +14,7 @@ typedef void *(*hook_lookup_fn)(const char *import_name);
 
 int   loader_map(Image *img, const char *path, ULONGLONG at);
 void  loader_attach(Image *img, ULONGLONG at);
+int   loader_imports(const Image *img, const char *dll);
 int   loader_fill_imports(Image *img, Image **mapped, int n_mapped, hook_lookup_fn hook);
 int   loader_protect(Image *img);
 void *loader_export(const Image *img, const char *name, WORD ordinal);

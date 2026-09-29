@@ -172,6 +172,16 @@ void *loader_export(const Image *img, const char *name, WORD ordinal)
     return export_of(img, name, ordinal, NULL, 0);
 }
 
+int loader_imports(const Image *img, const char *dll)
+{
+    IMAGE_DATA_DIRECTORY dir = img->nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (dir.VirtualAddress == 0) return 0;
+    IMAGE_IMPORT_DESCRIPTOR *desc = (IMAGE_IMPORT_DESCRIPTOR *)(img->base + dir.VirtualAddress);
+    for (; desc->Name != 0; desc++)
+        if (_stricmp((const char *)(img->base + desc->Name), dll) == 0) return 1;
+    return 0;
+}
+
 int loader_fill_imports(Image *img, Image **mapped, int n_mapped, hook_lookup_fn hook)
 {
     IMAGE_DATA_DIRECTORY dir = img->nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];

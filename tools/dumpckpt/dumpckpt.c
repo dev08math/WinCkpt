@@ -3,23 +3,16 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "ckpt_format.h"
+
 // Standalone reader for the M4a checkpoint (WCKPT002). Parses the file front
 // to back and applies the verification the milestone is judged by. It derives
 // the app image range from app.exe's own headers rather than hardcoding it, so
 // it stays honest if the preferred base ever changes.
 
-#define CKPT_PATH  "arena.ckpt"
-#define APP_PATH   "app.exe"
-#define CKPT_MAGIC 0x32303054504B4357ULL   // "WCKPT002"
+#define CKPT_PATH  DEFAULT_CKPT_PATH
+#define APP_PATH   DEFAULT_APP_PATH
 #define OLD_MAGIC  0x31303054504B4357ULL   // "WCKPT001"
-#define TAG_CONTEXT 0x584B4354ULL          // "TCKX"
-
-#define REGION_PLAIN 0u
-#define REGION_STACK 1u
-
-#define ARENA_BASE 0x2A0000000ULL
-#define ARENA_SIZE 0x40000000ULL
-#define PAGE       0x1000ULL
 
 static BYTE *read_whole(const char *path, DWORD *out_size)
 {

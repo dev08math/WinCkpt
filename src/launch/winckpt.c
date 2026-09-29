@@ -10,15 +10,15 @@
 int g_verbose;
 static ULONGLONG g_arena_base;
 static ULONGLONG g_arena_end;
-static ULONGLONG g_heap_end;
 static ULONGLONG g_stack_limit;
 static ULONGLONG g_stack_base;
 
 static Image  g_app  = { "app.exe" };
 static Image  g_ucrt = { "ucrtbase.dll" };
 static Image  g_vcrt = { "vcruntime140.dll" };
-static Image *g_crt_copies[] = { &g_ucrt, &g_vcrt };
-static Image *g_detach_order[] = { &g_vcrt, &g_ucrt };
+static Image *g_crt_copies[2];
+static Image *g_detach_order[2];
+static int    g_n_crt;
 
 static void app_returned(void)
 {
@@ -30,8 +30,6 @@ static int setup_app_stack(void)
 {
     g_stack_limit = g_arena_base + APP_STACK_OFF;
     g_stack_base  = g_stack_limit + APP_STACK_SIZE;
-    if (g_stack_base > g_arena_end || g_stack_limit < g_heap_end) return 0;
-
     if (!VirtualAlloc((LPVOID)g_stack_limit, (SIZE_T)APP_STACK_SIZE,
                       MEM_COMMIT, PAGE_READWRITE))
         return 0;
@@ -62,22 +60,41 @@ static void enter_app_on_arena_stack(ULONGLONG entry)
     RtlRestoreContext(&ctx, NULL);
 }
 
-static int map_crt_copy(Image *img, ULONGLONG off)
+static int app_dir_path(char *out, DWORD size, const char *name)
 {
-    char path[MAX_PATH];
-    UINT n = GetSystemDirectoryA(path, sizeof path);
-    if (n == 0 || n + strlen(img->name) + 2 > sizeof path) {
+    char *file = NULL;
+    DWORD n = GetFullPathNameA(DEFAULT_APP_PATH, size, out, &file);
+    if (n == 0 || n >= size || file == NULL) return 0;
+    *file = 0;
+    if (strlen(out) + strlen(name) + 1 > size) return 0;
+    strcat(out, name);
+    return 1;
+}
+
+static int system_dir_path(char *out, DWORD size, const char *name)
+{
+    UINT n = GetSystemDirectoryA(out, size);
+    if (n == 0 || n + strlen(name) + 2 > size) {
         fprintf(stderr, "launch: GetSystemDirectoryA failed, err=%lu\n", GetLastError());
         return 0;
     }
-    strcat(path, "\\");
-    strcat(path, img->name);
+    strcat(out, "\\");
+    strcat(out, name);
+    return 1;
+}
+
+static int map_crt_copy(Image *img, ULONGLONG off, int app_local_first)
+{
+    char path[MAX_PATH];
+    int found = app_local_first && app_dir_path(path, sizeof path, img->name)
+                && GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
+    if (!found && !system_dir_path(path, sizeof path, img->name)) return 0;
     return loader_map(img, path, g_arena_base + off);
 }
 
 static int fill(Image *img)
 {
-    if (!loader_fill_imports(img, g_crt_copies, 2, winckpt_hook_lookup)) return 0;
+    if (!loader_fill_imports(img, g_crt_copies, g_n_crt, winckpt_hook_lookup)) return 0;
     winckpt_hook_report(img->name);
     return loader_protect(img);
 }
@@ -89,6 +106,10 @@ int main(int argc, char **argv)
     for (int i = 1; i < argc; i++)
         if (!strcmp(argv[i], "-v")) g_verbose = 1;
 
+    // TODO: the base is fixed. Launch may take it from an arg, or choose it by scanning
+    // the address spaces of processes on this machine for a range none of them uses,
+    // then map app.exe there with relocations like the CRT copies, and record it in
+    // arena_start. Only restart must reuse the recorded base.
     BYTE *arena = (BYTE *)VirtualAlloc((LPVOID)ARENA_BASE, (SIZE_T)ARENA_SIZE,
                                        MEM_RESERVE, PAGE_READWRITE);
     if (arena == NULL || (ULONGLONG)arena != ARENA_BASE) {
@@ -98,13 +119,24 @@ int main(int argc, char **argv)
     }
     g_arena_base = ARENA_BASE;
     g_arena_end  = ARENA_BASE + ARENA_SIZE;
-    g_heap_end   = ARENA_BASE + HEAP_WINDOW;
-    VLOG("arena   0x%llX-0x%llX  %llu MB reserved\n",
-         g_arena_base, g_arena_end, ARENA_SIZE / (1024 * 1024));
+    VLOG("arena   0x%llX-0x%llX  %llu GB reserved\n",
+         g_arena_base, g_arena_end, ARENA_SIZE >> 30);
 
     if (!loader_map(&g_app, DEFAULT_APP_PATH, ARENA_BASE)) return 1;
-    if (!map_crt_copy(&g_ucrt, UCRT_OFF)) return 1;
-    if (!map_crt_copy(&g_vcrt, VCRT_OFF)) return 1;
+    if (g_app.nt->OptionalHeader.SizeOfImage > APP_STACK_OFF) {
+        fprintf(stderr, "launch: app.exe is %lu bytes, its slot is %llu\n",
+                g_app.nt->OptionalHeader.SizeOfImage, APP_STACK_OFF);
+        return 1;
+    }
+    // Windows 10+ always loads the System32 ucrtbase and ignores an app-local copy.
+    if (!map_crt_copy(&g_ucrt, UCRT_OFF, 0)) return 1;
+    g_crt_copies[g_n_crt++] = &g_ucrt;
+    if (loader_imports(&g_app, g_vcrt.name)) {
+        if (!map_crt_copy(&g_vcrt, VCRT_OFF, 1)) return 1;
+        g_crt_copies[g_n_crt++] = &g_vcrt;
+    }
+    for (int i = 0; i < g_n_crt; i++)
+        g_detach_order[i] = g_crt_copies[g_n_crt - 1 - i];
 
     ULONGLONG app_end = (ULONGLONG)g_app.base + g_app.nt->OptionalHeader.SizeOfImage;
     if (!setup_app_stack()) {
@@ -124,8 +156,8 @@ int main(int argc, char **argv)
     memset(&a, 0, sizeof a);
     a.base        = g_arena_base;
     a.end         = g_arena_end;
-    a.heap_start  = (app_end + (PAGE - 1)) & ~(PAGE - 1);
-    a.heap_end    = g_heap_end;
+    a.heap_start  = g_arena_base + HEAP_OFF;
+    a.heap_end    = g_arena_end;
     a.stack_limit = g_stack_limit;
     a.stack_base  = g_stack_base;
     a.app_base    = (ULONGLONG)g_app.base;
@@ -134,16 +166,18 @@ int main(int argc, char **argv)
     a.app_thread  = app_thread;
     a.verbose     = g_verbose;
     a.detach      = g_detach_order;
-    a.n_detach    = 2;
+    a.n_detach    = g_n_crt;
     if (!winckpt_init(&a)) {
         fprintf(stderr, "launch: winckpt_init failed\n");
         return 1;
     }
 
-    if (!fill(&g_ucrt) || !fill(&g_vcrt) || !fill(&g_app)) return 1;
+    for (int i = 0; i < g_n_crt; i++)
+        if (!fill(g_crt_copies[i])) return 1;
+    if (!fill(&g_app)) return 1;
 
-    if (!loader_dll_main(&g_ucrt, DLL_PROCESS_ATTACH)) return 1;
-    if (!loader_dll_main(&g_vcrt, DLL_PROCESS_ATTACH)) return 1;
+    for (int i = 0; i < g_n_crt; i++)
+        if (!loader_dll_main(g_crt_copies[i], DLL_PROCESS_ATTACH)) return 1;
     if (!loader_run_tls(&g_app, DLL_PROCESS_ATTACH)) return 1;
 
     printf("launch: system ucrtbase loaded: %s\n",

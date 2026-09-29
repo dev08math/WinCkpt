@@ -30,7 +30,7 @@
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
     </ClCompile>
     <Link>
-      <BaseAddress>0x2A0000000</BaseAddress>
+      <BaseAddress>0x100000000000</BaseAddress>
     </Link>
   </ItemDefinitionGroup>
 
