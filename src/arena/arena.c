@@ -25,7 +25,6 @@
 int           g_verbose;
 winckpt_arena g_arena;
 heap_ctl     *g_ctl;
-ULONGLONG     g_n_malloc, g_n_free, g_n_realloc, g_n_calloc;
 
 static int ensure_committed(ULONGLONG upto)
 {
@@ -51,7 +50,17 @@ int arena_init(const winckpt_arena *a)
     g_ctl->cur       = g_arena.heap_start + HEAP_CTL_RESERVE;
     g_ctl->committed = g_arena.heap_start + PAGE;
     g_ctl->free_head = 0;
+    g_ctl->n_malloc  = 0;
+    g_ctl->n_free    = 0;
+    g_ctl->n_realloc = 0;
+    g_ctl->n_calloc  = 0;
     return 1;
+}
+
+void arena_adopt(const winckpt_arena *a)
+{
+    g_arena = *a;
+    g_ctl   = (heap_ctl *)g_arena.heap_start;
 }
 
 void arena_dump_ctl(const char *when)
@@ -74,7 +83,7 @@ void *arena_malloc(size_t n)
             else      g_ctl->free_head = (ULONGLONG)cur->next;
             cur->used = n;
             void *p = (char *)cur + HDR;
-            g_n_malloc++;
+            g_ctl->n_malloc++;
             VLOG("  [heap] malloc(%zu) reuse -> 0x%p\n", n, p);
             return p;
         }
@@ -90,7 +99,7 @@ void *arena_malloc(size_t n)
     b->used = n;
     g_ctl->cur = at + HDR + need;
     void *p = (char *)b + HDR;
-    g_n_malloc++;
+    g_ctl->n_malloc++;
     VLOG("  [heap] malloc(%zu) -> 0x%p\n", n, p);
     return p;
 }
@@ -101,7 +110,7 @@ void arena_free(void *p)
     Block *b = (Block *)((char *)p - HDR);
     b->next = (Block *)g_ctl->free_head;
     g_ctl->free_head = (ULONGLONG)b;
-    g_n_free++;
+    g_ctl->n_free++;
     VLOG("  [heap] free(0x%p)\n", p);
 }
 
@@ -112,7 +121,7 @@ void *arena_realloc(void *p, size_t n)
     Block *b = (Block *)((char *)p - HDR);
     if (b->size >= n) {
         b->used = n;
-        g_n_realloc++;
+        g_ctl->n_realloc++;
         VLOG("  [heap] realloc(0x%p,%zu) in-place\n", p, n);
         return p;
     }
@@ -120,7 +129,7 @@ void *arena_realloc(void *p, size_t n)
     if (!q) return NULL;
     memcpy(q, p, b->used);
     arena_free(p);
-    g_n_realloc++;
+    g_ctl->n_realloc++;
     VLOG("  [heap] realloc(0x%p,%zu) moved -> 0x%p\n", p, n, q);
     return q;
 }
@@ -131,7 +140,7 @@ void *arena_calloc(size_t count, size_t sz)
     if (count != 0 && total / count != sz) return NULL;
     void *p = arena_malloc(total);
     if (p) memset(p, 0, total);
-    g_n_calloc++;
+    g_ctl->n_calloc++;
     VLOG("  [heap] calloc(%zu,%zu) -> 0x%p\n", count, sz, p);
     return p;
 }
@@ -176,7 +185,7 @@ LPVOID WINAPI arena_heap_realloc(HANDLE heap, DWORD flags, LPVOID p, SIZE_T n)
     }
     if ((flags & HEAP_ZERO_MEMORY) && n > old)
         memset((char *)q + old, 0, n - old);
-    g_n_realloc++;
+    g_ctl->n_realloc++;
     VLOG("  [heap] HeapReAlloc(0x%p,%zu) -> 0x%p\n", p, n, q);
     return q;
 }

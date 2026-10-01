@@ -8,6 +8,7 @@
     <Project Path="src/boundary/boundary.vcxproj" Id="a1e00008-0000-4000-8000-00000000a008" />
     <Project Path="src/checkpoint/winckpt_api.vcxproj" Id="a1e00002-0000-4000-8000-00000000a002" />
     <Project Path="src/launch/winckpt.vcxproj" Id="a1e00003-0000-4000-8000-00000000a003" />
+    <Project Path="src/restart/restarter.vcxproj" Id="a1e00005-0000-4000-8000-00000000a005" />
     <Project Path="tests/app/app.vcxproj" Id="a1e00004-0000-4000-8000-00000000a004" />
     <Project Path="tools/dumpckpt/dumpckpt.vcxproj" Id="a1e00006-0000-4000-8000-00000000a006" />
   </Folder>

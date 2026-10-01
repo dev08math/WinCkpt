@@ -31,12 +31,14 @@
 
   <ItemGroup>
     <ClInclude Include="$(RepoRoot)include\ckpt_format.h" />
-    <ClInclude Include="$(RepoRoot)include\arena.h" />
+    <ClInclude Include="$(RepoRoot)include\winckpt_api.h" />
+    <ClInclude Include="$(RepoRoot)include\loader.h" />
     <ClInclude Include="$(RepoRoot)include\log.h" />
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="$(RepoRoot)src\arena\arena.vcxproj" />
+    <ProjectReference Include="$(RepoRoot)src\checkpoint\winckpt_api.vcxproj" />
+    <ProjectReference Include="$(RepoRoot)src\loader\loader.vcxproj" />
   </ItemGroup>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

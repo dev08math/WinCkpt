@@ -10,7 +10,7 @@
 #include "winckpt_api.h"
 #include "log.h"
 
-static void snapshot_free(Snapshot *s)
+WINCKPT_API void snapshot_free(Snapshot *s)
 {
     free(s->rg);
     free(s->bytes);
@@ -117,6 +117,125 @@ static int write_ckpt(const char *path, const Snapshot *s, ULONGLONG *out_bytes)
     return ok;
 }
 
+static BYTE *read_file(const char *path, DWORD *out_size)
+{
+    HANDLE h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        fprintf(stderr, "ckpt_read: CreateFileA(%s) failed, err=%lu\n", path, GetLastError());
+        return NULL;
+    }
+    LARGE_INTEGER size;
+    if (!GetFileSizeEx(h, &size) || size.QuadPart > MAXDWORD) {
+        fprintf(stderr, "ckpt_read: %s: size unreadable or over 4 GB\n", path);
+        CloseHandle(h);
+        return NULL;
+    }
+    BYTE *buf = (BYTE *)malloc((size_t)size.QuadPart);
+    DWORD got = 0;
+    if (!buf || !ReadFile(h, buf, size.LowPart, &got, NULL) || got != size.LowPart) {
+        fprintf(stderr, "ckpt_read: ReadFile(%s) failed, err=%lu\n", path, GetLastError());
+        CloseHandle(h);
+        free(buf);
+        return NULL;
+    }
+    CloseHandle(h);
+    *out_size = size.LowPart;
+    return buf;
+}
+
+static int parse_ckpt(const BYTE *p, const BYTE *end, Snapshot *s)
+{
+    ULONGLONG hdr[5];
+    if ((ULONGLONG)(end - p) < sizeof(hdr)) {
+        fprintf(stderr, "ckpt_read: truncated header\n");
+        return 0;
+    }
+    memcpy(hdr, p, sizeof(hdr));
+    p += sizeof(hdr);
+    if (hdr[0] != CKPT_MAGIC) {
+        fprintf(stderr, "ckpt_read: bad magic 0x%llX\n", hdr[0]);
+        return 0;
+    }
+    s->arena_start     = hdr[1];
+    s->count           = hdr[2];
+    s->context_present = hdr[3];
+    s->total           = hdr[4];
+
+    ULONGLONG rec[4];
+    if (s->count > (ULONGLONG)(end - p) / sizeof(rec) || s->total > (ULONGLONG)(end - p)) {
+        fprintf(stderr, "ckpt_read: %llu regions, %llu bytes: larger than the file\n",
+                s->count, s->total);
+        return 0;
+    }
+    s->rg    = (RegionRec *)calloc((size_t)s->count, sizeof(RegionRec));
+    s->bytes = (BYTE *)malloc((size_t)s->total);
+    if (!s->rg || !s->bytes) {
+        fprintf(stderr, "ckpt_read: out of memory\n");
+        return 0;
+    }
+
+    ULONGLONG off = 0;
+    for (ULONGLONG i = 0; i < s->count; i++) {
+        if ((ULONGLONG)(end - p) < sizeof(rec)) {
+            fprintf(stderr, "ckpt_read: truncated region record %llu\n", i);
+            return 0;
+        }
+        memcpy(rec, p, sizeof(rec));
+        p += sizeof(rec);
+        RegionRec *r = &s->rg[i];
+        r->base    = rec[0];
+        r->size    = rec[1];
+        r->protect = (DWORD)rec[2];
+        r->kind    = (DWORD)rec[3];
+        r->off     = off;
+        if (r->size > (ULONGLONG)(end - p) || r->size > s->total - off) {
+            fprintf(stderr, "ckpt_read: truncated payload of region %llu\n", i);
+            return 0;
+        }
+        memcpy(s->bytes + off, p, (size_t)r->size);
+        p += r->size;
+        off += r->size;
+    }
+    if (off != s->total) {
+        fprintf(stderr, "ckpt_read: payload %llu bytes, header says %llu\n", off, s->total);
+        return 0;
+    }
+
+    if (s->context_present) {
+        ULONGLONG tag;
+        if ((ULONGLONG)(end - p) < sizeof(tag) + sizeof(CONTEXT)) {
+            fprintf(stderr, "ckpt_read: truncated context\n");
+            return 0;
+        }
+        memcpy(&tag, p, sizeof(tag));
+        p += sizeof(tag);
+        if (tag != TAG_CONTEXT) {
+            fprintf(stderr, "ckpt_read: bad context tag 0x%llX\n", tag);
+            return 0;
+        }
+        memcpy(&s->ctx, p, sizeof(CONTEXT));
+        p += sizeof(CONTEXT);
+    }
+    if (p != end) {
+        fprintf(stderr, "ckpt_read: %llu trailing bytes\n", (ULONGLONG)(end - p));
+        return 0;
+    }
+    return 1;
+}
+
+WINCKPT_API int ckpt_read(const char *path, Snapshot *s)
+{
+    memset(s, 0, sizeof(*s));
+    DWORD fsize = 0;
+    BYTE *file = read_file(path, &fsize);
+    if (!file) return 0;
+    int ok = parse_ckpt(file, file + fsize, s);
+    free(file);
+    if (!ok) snapshot_free(s);
+    return ok;
+}
+
 static void do_checkpoint(const CONTEXT *ctx)
 {
     ULONGLONG vq_high = 0;
@@ -218,6 +337,10 @@ WINCKPT_API void winckpt_checkpoint(void)
         VLOG("ckpt: unwound %d frame(s) to reach the app\n", frames);
 
     do_checkpoint(&ctx);
+    if (g_arena.exit_after_ckpt) {
+        printf("ckpt: %s written, exiting (-k)\n", DEFAULT_CKPT_PATH);
+        TerminateProcess(GetCurrentProcess(), 0);
+    }
     DLOG("--- app resumes ---\n");
 }
 
@@ -225,10 +348,10 @@ static void on_app_exit(UINT code)
 {
     DLOG("\n--- app exit %u ---\n", code);
     VLOG("winckpt: %llu malloc / %llu free / %llu realloc / %llu calloc\n",
-         g_n_malloc, g_n_free, g_n_realloc, g_n_calloc);
+         g_ctl->n_malloc, g_ctl->n_free, g_ctl->n_realloc, g_ctl->n_calloc);
     if (g_verbose) arena_dump_ctl("at exit");
     if (code == 0 && g_ctl->cur > g_arena.heap_start && g_ctl->cur <= g_ctl->committed)
-        printf("PASS    %llu upper-half allocs, all in arena\n", g_n_malloc + g_n_calloc);
+        printf("PASS    %llu upper-half allocs, all in arena\n", g_ctl->n_malloc + g_ctl->n_calloc);
     else
         printf("FAIL    exit code %u or arena allocator control block not sane\n", code);
 }
@@ -241,6 +364,11 @@ WINCKPT_API void *winckpt_hook_lookup(const char *import_name)
 WINCKPT_API void winckpt_hook_report(const char *module)
 {
     boundary_report(module);
+}
+
+WINCKPT_API int winckpt_rebind_std(const Image *ucrt)
+{
+    return boundary_rebind_std(ucrt);
 }
 
 WINCKPT_API int winckpt_init(const winckpt_arena *a)
@@ -257,6 +385,20 @@ WINCKPT_API int winckpt_init(const winckpt_arena *a)
 
     VLOG("winckpt: heap at 0x%llX, ctl reserve %llu bytes, emu at 0x%llX\n",
          g_arena.heap_start, (ULONGLONG)HEAP_CTL_RESERVE, a->emu_at);
+    return 1;
+}
+
+WINCKPT_API int winckpt_adopt(const winckpt_arena *a)
+{
+    g_verbose = a->verbose;
+    setvbuf(stdout, NULL, _IONBF, 0);
+
+    arena_adopt(a);
+    if (!boundary_adopt(a->emu_at)) return 0;
+    boundary_on_exit(a->detach, a->n_detach, on_app_exit);
+
+    VLOG("winckpt: adopted heap at 0x%llX (cur=0x%llX), emu at 0x%llX\n",
+         g_arena.heap_start, g_ctl->cur, a->emu_at);
     return 1;
 }
 

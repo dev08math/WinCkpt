@@ -1,11 +1,14 @@
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <errno.h>
 
 __declspec(dllimport) void winckpt_checkpoint(void);
 
 #define LOOP_ITERS  10
-#define CKPT_AT      4
+#define CKPT_AT_1    4
+#define CKPT_AT_2    7
 
 static int fill_check(unsigned char *p, size_t n, unsigned char seed)
 {
@@ -68,14 +71,21 @@ int main(void)
     unsigned char *live = (unsigned char *)malloc(256);
     printf("app: live buffer at %p\n", (void *)live);
 
+    static char words[] = "w0 w1 w2 w3 w4 w5 w6 w7 w8 w9";
+    srand(42);
+    char *tok = strtok(words, " ");
+
     for (int i = 0; i < LOOP_ITERS; i++) {
         live[i] = (unsigned char)(0xA0 + i);
-        printf("app: iteration %d (live[%d]=0x%02X)\n", i, i, live[i]);
-        if (i == CKPT_AT) {
+        printf("app: iteration %d (live[%d]=0x%02X) rand=%d tok=%s\n",
+               i, i, live[i], rand(), tok);
+        if (i == CKPT_AT_1 || i == CKPT_AT_2) {
             printf("app: --- calling winckpt_checkpoint() ---\n");
+            errno = 1000 + i;
             winckpt_checkpoint();
-            printf("app: --- returned from winckpt_checkpoint() ---\n");
+            printf("app: --- returned from winckpt_checkpoint() --- errno=%d\n", errno);
         }
+        tok = strtok(NULL, " ");
     }
 
     printf("app: loop done\n");

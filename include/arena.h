@@ -11,6 +11,7 @@ typedef struct heap_ctl {
     ULONGLONG cur;
     ULONGLONG committed;
     ULONGLONG free_head;
+    ULONGLONG n_malloc, n_free, n_realloc, n_calloc;
 } heap_ctl;
 
 // Bytes the heap gives up to heap_ctl before the first allocation.
@@ -29,9 +30,9 @@ typedef struct Block {
 
 extern winckpt_arena g_arena;
 extern heap_ctl     *g_ctl;
-extern ULONGLONG     g_n_malloc, g_n_free, g_n_realloc, g_n_calloc;
 
 int   arena_init(const winckpt_arena *a);
+void  arena_adopt(const winckpt_arena *a);
 void *arena_malloc(size_t n);
 void  arena_free(void *p);
 void *arena_realloc(void *p, size_t n);

@@ -1,10 +1,52 @@
 #include <windows.h>
+#include <intrin.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "loader.h"
 #include "log.h"
+
+// Undocumented x64 layouts of PEB, PEB_LDR_DATA, LDR_DATA_TABLE_ENTRY and
+// RTL_USER_PROCESS_PARAMETERS, cut down to the fields loader_become_main writes.
+typedef struct UStr {
+    USHORT len;
+    USHORT max;
+    PWSTR  buf;
+} UStr;
+
+typedef struct Peb {
+    BYTE  flags[8];
+    void *mutant;
+    BYTE *image_base;
+    BYTE *ldr;
+    BYTE *params;
+} Peb;
+
+typedef struct LdrData {
+    ULONG      length;
+    ULONG      initialized;
+    void      *ss_handle;
+    LIST_ENTRY load_order;
+} LdrData;
+
+typedef struct LdrEntry {
+    LIST_ENTRY load_links;
+    LIST_ENTRY memory_links;
+    LIST_ENTRY init_links;
+    BYTE      *base;
+    BYTE      *entry;
+    ULONG      size;
+    UStr       full_name;
+    UStr       base_name;
+} LdrEntry;
+
+typedef struct ProcParams {
+    BYTE before_image_path[0x60];
+    UStr image_path;
+} ProcParams;
+
+static WCHAR g_main_path[MAX_PATH];
 
 static BYTE *read_file(const char *path, DWORD *out_size)
 {
@@ -268,6 +310,35 @@ int loader_protect(Image *img)
                 img->name, GetLastError());
         return 0;
     }
+    return 1;
+}
+
+int loader_become_main(const Image *img, const char *path)
+{
+    WCHAR wide[MAX_PATH];
+    WCHAR *file = NULL;
+    if (!MultiByteToWideChar(CP_ACP, 0, path, -1, wide, MAX_PATH) ||
+        !GetFullPathNameW(wide, MAX_PATH, g_main_path, &file) || !file) {
+        fprintf(stderr, "loader: %s: full path failed, err=%lu\n", path, GetLastError());
+        return 0;
+    }
+
+    Peb      *peb    = (Peb *)__readgsqword(0x60);
+    LdrEntry *main   = (LdrEntry *)((LdrData *)peb->ldr)->load_order.Flink;
+    UStr      full   = { (USHORT)(wcslen(g_main_path) * sizeof(WCHAR)), (USHORT)sizeof g_main_path,
+                         g_main_path };
+    UStr      name   = { (USHORT)(wcslen(file) * sizeof(WCHAR)),
+                         (USHORT)((g_main_path + MAX_PATH - file) * sizeof(WCHAR)), file };
+
+    peb->image_base = img->base;
+    main->base      = img->base;
+    main->entry     = img->base + img->nt->OptionalHeader.AddressOfEntryPoint;
+    main->size      = img->nt->OptionalHeader.SizeOfImage;
+    main->full_name = full;
+    main->base_name = name;
+    ((ProcParams *)peb->params)->image_path = full;
+
+    VLOG("loader: %-16s is the main module: %ls\n", img->name, g_main_path);
     return 1;
 }
 

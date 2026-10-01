@@ -8,6 +8,7 @@
 #include "log.h"
 
 int g_verbose;
+static int g_exit_after_ckpt;
 static ULONGLONG g_arena_base;
 static ULONGLONG g_arena_end;
 static ULONGLONG g_stack_limit;
@@ -105,6 +106,7 @@ int main(int argc, char **argv)
 
     for (int i = 1; i < argc; i++)
         if (!strcmp(argv[i], "-v")) g_verbose = 1;
+        else if (!strcmp(argv[i], "-k")) g_exit_after_ckpt = 1;
 
     // TODO: the base is fixed. Launch may take it from an arg, or choose it by scanning
     // the address spaces of processes on this machine for a range none of them uses,
@@ -128,6 +130,7 @@ int main(int argc, char **argv)
                 g_app.nt->OptionalHeader.SizeOfImage, APP_STACK_OFF);
         return 1;
     }
+    if (!loader_become_main(&g_app, DEFAULT_APP_PATH)) return 1;
     // Windows 10+ always loads the System32 ucrtbase and ignores an app-local copy.
     if (!map_crt_copy(&g_ucrt, UCRT_OFF, 0)) return 1;
     g_crt_copies[g_n_crt++] = &g_ucrt;
@@ -165,6 +168,7 @@ int main(int argc, char **argv)
     a.emu_at      = g_arena_base + EMU_OFF;
     a.app_thread  = app_thread;
     a.verbose     = g_verbose;
+    a.exit_after_ckpt = g_exit_after_ckpt;
     a.detach      = g_detach_order;
     a.n_detach    = g_n_crt;
     if (!winckpt_init(&a)) {

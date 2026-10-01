@@ -20,13 +20,30 @@ Binaries are placed in `build\bin\x64\Release\`.
 
 ```
 winckpt.exe      launch the target program under WinCkpt
+restarter.exe    restart the program from its checkpoint image
 dumpckpt.exe     inspect and verify a checkpoint image
+
+-v               verbose output
+-k               exit once the checkpoint is written
 ```
+
+`app.exe` and `arena.ckpt` are read from the working directory. A checkpoint, a restart,
+a second checkpoint and a second restart:
+
+```
+cd build\bin\x64\Release
+winckpt.exe -k
+restarter.exe -k
+restarter.exe
+```
+
+The combined output is identical to an uninterrupted run.
 
 ## Status
 
-WinCkpt currently checkpoints single-threaded C programs. Restart is under active
-development, with multithreading and handle support to follow.
+WinCkpt checkpoints and restarts single-threaded C programs, including after a reboot; a
+restarted program can checkpoint again. Open files and other kernel objects,
+multithreading, and an external checkpoint trigger are in progress.
 
 ## References
 

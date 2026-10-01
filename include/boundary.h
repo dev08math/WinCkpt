@@ -5,7 +5,25 @@
 
 #include "loader.h"
 
-#define EMU_SLOTS 64
+#define EMU_SLOTS   64
+#define EMU_PROCS   64
+#define EMU_MODULES 32
+
+// A module handle the upper half holds, and the same module in this process.
+typedef struct EmuModule {
+    HMODULE saved;
+    HMODULE now;
+    WCHAR   path[MAX_PATH];
+} EmuModule;
+
+// A GetProcAddress result. The upper half holds the address of a stub that
+// jumps through target; restart re-resolves target for this boot.
+typedef struct EmuProc {
+    int       module;
+    WORD      ordinal;
+    char      name[128];
+    ULONGLONG target;
+} EmuProc;
 
 // Lower-half state the upper half would otherwise hold only by index or pointer,
 // emulated here so it lives in the arena and comes back with a checkpoint.
@@ -17,14 +35,19 @@ typedef struct Emu {
     void                  *tls_val[EMU_SLOTS];
     char                  *cmdline_a;
     WCHAR                 *cmdline_w;
+    int                    n_mod;
+    EmuModule              mod[EMU_MODULES];
+    int                    n_proc;
+    EmuProc                proc[EMU_PROCS];
 } Emu;
 
 typedef void (*exit_fn)(UINT code);
 
 int   boundary_init(ULONGLONG emu_at);
-void  boundary_adopt(ULONGLONG emu_at);
+int   boundary_adopt(ULONGLONG emu_at);
 void  boundary_on_exit(Image **detach_order, int n, exit_fn on_exit);
 void *boundary_hook(const char *import_name);
 void  boundary_report(const char *module);
+int   boundary_rebind_std(const Image *ucrt);
 
 #endif

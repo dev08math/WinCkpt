@@ -4,15 +4,10 @@
 #include <string.h>
 
 #include "ckpt_format.h"
-
-// Standalone reader for the M4a checkpoint (WCKPT002). Parses the file front
-// to back and applies the verification the milestone is judged by. It derives
-// the app image range from app.exe's own headers rather than hardcoding it, so
-// it stays honest if the preferred base ever changes.
+#include "winckpt_api.h"
 
 #define CKPT_PATH  DEFAULT_CKPT_PATH
 #define APP_PATH   DEFAULT_APP_PATH
-#define OLD_MAGIC  0x31303054504B4357ULL   // "WCKPT001"
 
 static BYTE *read_whole(const char *path, DWORD *out_size)
 {
@@ -49,65 +44,23 @@ static int app_image_range(ULONGLONG *lo, ULONGLONG *hi)
     return 1;
 }
 
-// TODO: this parser is duplicated in restarter.c. Both should call one shared
-// reader built on ckpt_format.h.
 int main(void)
 {
-    DWORD fsize = 0;
-    BYTE *file = read_whole(CKPT_PATH, &fsize);
-    if (!file) return 1;
-
-    BYTE *p = file, *end = file + fsize;
-    if ((ULONGLONG)(end - p) < 40) { fprintf(stderr, "dumpckpt: truncated header\n"); return 1; }
-
-    ULONGLONG magic, arena_start, count, ctx_present, total;
-    memcpy(&magic, p, 8);        p += 8;
-    memcpy(&arena_start, p, 8);  p += 8;
-    memcpy(&count, p, 8);        p += 8;
-    memcpy(&ctx_present, p, 8);  p += 8;
-    memcpy(&total, p, 8);        p += 8;
-
-    if (magic == OLD_MAGIC) {
-        fprintf(stderr, "dumpckpt: WCKPT001 file -- format superseded, refusing\n");
-        return 1;
-    }
-    if (magic != CKPT_MAGIC) { fprintf(stderr, "dumpckpt: bad magic 0x%llX\n", magic); return 1; }
+    Snapshot s;
+    if (!ckpt_read(CKPT_PATH, &s)) return 1;
 
     printf("header: magic=WCKPT002 arena_start=0x%llX regions=%llu "
            "context_present=%llu total_bytes=%llu\n",
-           arena_start, count, ctx_present, total);
+           s.arena_start, s.count, s.context_present, s.total);
 
     ULONGLONG stack_base = 0, stack_size = 0;
     int stack_regions = 0;
-    ULONGLONG seen = 0;
 
-    for (ULONGLONG i = 0; i < count; i++) {
-        if ((ULONGLONG)(end - p) < 32) { fprintf(stderr, "dumpckpt: truncated rec %llu\n", i); return 1; }
-        ULONGLONG rec[4];
-        memcpy(rec, p, 32); p += 32;
-        ULONGLONG base = rec[0], size = rec[1];
-        DWORD prot = (DWORD)rec[2], kind = (DWORD)rec[3];
-
-        if ((ULONGLONG)(end - p) < size) { fprintf(stderr, "dumpckpt: truncated payload %llu\n", i); return 1; }
-        p += size;
-        seen += size;
-
+    for (ULONGLONG i = 0; i < s.count; i++) {
+        const RegionRec *r = &s.rg[i];
         printf("region[%llu] base=0x%011llX size=0x%08llX protect=0x%-3lX kind=%s\n",
-               i, base, size, prot, kind == REGION_STACK ? "STACK" : "PLAIN");
-
-        if (kind == REGION_STACK) { stack_base = base; stack_size = size; stack_regions++; }
-    }
-
-    CONTEXT ctx;
-    memset(&ctx, 0, sizeof(ctx));
-    if (ctx_present) {
-        if ((ULONGLONG)(end - p) < 8 + sizeof(CONTEXT)) {
-            fprintf(stderr, "dumpckpt: truncated context\n"); return 1;
-        }
-        ULONGLONG tag;
-        memcpy(&tag, p, 8); p += 8;
-        if (tag != TAG_CONTEXT) { fprintf(stderr, "dumpckpt: bad context tag\n"); return 1; }
-        memcpy(&ctx, p, sizeof(ctx)); p += sizeof(ctx);
+               i, r->base, r->size, r->protect, r->kind == REGION_STACK ? "STACK" : "PLAIN");
+        if (r->kind == REGION_STACK) { stack_base = r->base; stack_size = r->size; stack_regions++; }
     }
 
     printf("\n");
@@ -117,10 +70,11 @@ int main(void)
     else
         printf("stack region: %d found (expected exactly 1)\n", stack_regions);
 
-    if (ctx_present) {
+    const CONTEXT *ctx = &s.ctx;
+    if (s.context_present) {
         printf("context: Rip=0x%llX Rsp=0x%llX Rbp=0x%llX Rbx=0x%llX\n",
-               ctx.Rip, ctx.Rsp, ctx.Rbp, ctx.Rbx);
-        ULONGLONG live_lo = ctx.Rsp & ~(PAGE - 1);
+               ctx->Rip, ctx->Rsp, ctx->Rbp, ctx->Rbx);
+        ULONGLONG live_lo = ctx->Rsp & ~(PAGE - 1);
         printf("live stack extent: [0x%llX .. 0x%llX) = %llu bytes of the %llu captured\n",
                live_lo, stack_base + stack_size,
                (stack_base + stack_size) - live_lo, stack_size);
@@ -135,7 +89,7 @@ int main(void)
     int ok = 1;
 
     if (have_app) {
-        int a = ctx_present && ctx.Rip >= app_lo && ctx.Rip < app_hi;
+        int a = s.context_present && ctx->Rip >= app_lo && ctx->Rip < app_hi;
         printf("  [A] Rip inside app image [0x%llX..0x%llX): %s\n",
                app_lo, app_hi, a ? "PASS" : "FAIL");
         ok &= a;
@@ -144,8 +98,8 @@ int main(void)
         ok = 0;
     }
 
-    int b = ctx_present && stack_regions == 1
-            && ctx.Rsp >= stack_base && ctx.Rsp < stack_base + stack_size;
+    int b = s.context_present && stack_regions == 1
+            && ctx->Rsp >= stack_base && ctx->Rsp < stack_base + stack_size;
     printf("  [B] Rsp inside captured stack region: %s\n", b ? "PASS" : "FAIL");
     ok &= b;
 
@@ -155,12 +109,7 @@ int main(void)
     printf("  [C] stack region inside arena (upper-half pure): %s\n", c ? "PASS" : "FAIL");
     ok &= c;
 
-    int d = (p == end) && (seen == total);
-    printf("  [D] bytes consumed == file size: %s (%llu/%lu, payload %llu/%llu)\n",
-           d ? "PASS" : "FAIL", (ULONGLONG)(p - file), fsize, seen, total);
-    ok &= d;
-
     printf("\n%s\n", ok ? "dumpckpt: ALL CHECKS PASS" : "dumpckpt: CHECKS FAILED");
-    free(file);
+    snapshot_free(&s);
     return ok ? 0 : 1;
 }
