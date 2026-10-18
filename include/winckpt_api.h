@@ -25,17 +25,21 @@ typedef struct winckpt_arena {
     HANDLE    app_thread;   // duplicated, THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT
     int       verbose;
     int       exit_after_ckpt;
-    Image   **detach;       // CRT copies, in the order their DllMain(DETACH) must run
-    int       n_detach;
+    Image   **crt;          // CRT copies, in DllMain(ATTACH) order
+    int       n_crt;
+    const Image *app;
+    const char  *app_path;
+    const char  *ckpt_path;
+    const WCHAR *cmdline;   // NULL on restart: the arena already holds it
 } winckpt_arena;
 
 WINCKPT_API int winckpt_init(const winckpt_arena *a);
 
 WINCKPT_API int winckpt_adopt(const winckpt_arena *a);
 
-WINCKPT_API void *winckpt_hook_lookup(const char *import_name);
+WINCKPT_API int winckpt_fill(Image *img, Image **crt, int n_crt);
 
-WINCKPT_API void winckpt_hook_report(const char *module);
+WINCKPT_API void winckpt_enter(CONTEXT *ctx);
 
 WINCKPT_API int winckpt_rebind_std(const Image *ucrt);
 

@@ -3,14 +3,10 @@
 
 #include <windows.h>
 
-// TODO: checkpoint paths are fixed and the reader accepts exactly one layout.
-// Needs argv-supplied paths and a versioned reader that dispatches on the magic
-// so older checkpoints stay readable as the format changes.
-#define DEFAULT_CKPT_PATH  "arena.ckpt"
-#define DEFAULT_APP_PATH   "app.exe"
+#define CKPT_SUFFIX     ".wckpt"
+#define CKPT_DIR_ENV    "WINCKPT_CHECKPOINT_DIR"
 
-// Rejects a stale or non-checkpoint file before its bytes are mapped and run.
-#define CKPT_MAGIC 0x32303054504B4357ULL   // "WCKPT002"
+#define CKPT_MAGIC 0x33303054504B4357ULL   // "WCKPT003"
 
 // Marks the start of the CONTEXT record, after the variable-length regions.
 #define TAG_CONTEXT 0x584B4354ULL          // "TCKX"
@@ -18,20 +14,15 @@
 #define REGION_PLAIN 0u
 #define REGION_STACK 1u
 
-// Early stacks and heaps of a new process are placed at random below ~3 TB; in 300
-// fresh processes nothing was ever mapped between 16 TB and 32 TB. Below 16 TB even
-// a 1 GB range collided in 2 of 300. app.exe is linked at this address, which the
-// loader requires since it does not relocate the app.
-// TODO: once the loader applies .reloc to the app, launch can pick a free base and
-// record it in arena_start. The restarter then reads that from the header in its
-// TLS callback instead of using this constant.
+// 300 fresh processes put early stacks and heaps below ~3 TB and nothing at 16 TB.
+// TODO: launch picks the base and records it in arena_start; restart reads it.
 #define ARENA_BASE 0x100000000000ULL
 
-// 64 GB of addresses. Reserving costs no RAM; the heap takes everything past HEAP_OFF.
+// Reserving costs no RAM; the heap takes everything past HEAP_OFF.
 #define ARENA_SIZE 0x1000000000ULL
 #define PAGE       0x1000ULL
 
-// Offsets from the base address of the arena. app.exe must end before APP_STACK_OFF.
+// Offsets from the base address of the arena. The app's image must end before APP_STACK_OFF.
 #define APP_STACK_OFF  0x10000000ULL
 #define APP_STACK_SIZE 0x00100000ULL
 #define UCRT_OFF       0x11000000ULL
@@ -49,6 +40,7 @@ typedef struct RegionRec {
 } RegionRec;
 
 typedef struct Snapshot {
+    char       app_path[MAX_PATH];
     ULONGLONG  arena_start;
     ULONGLONG  count;
     ULONGLONG  total;

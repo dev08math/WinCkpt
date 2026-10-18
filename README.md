@@ -19,22 +19,24 @@ Binaries are placed in `build\bin\x64\Release\`.
 ## Usage
 
 ```
-winckpt.exe      launch the target program under WinCkpt
-restarter.exe    restart the program from its checkpoint image
-dumpckpt.exe     inspect and verify a checkpoint image
+winckpt.exe [-v] [-k] [--ckptdir DIR] [--] <program> [args...]
+restarter.exe [-v] [-k] <ckpt.wckpt>
+dumpckpt.exe <ckpt.wckpt>
 
 -v               verbose output
 -k               exit once the checkpoint is written
+--ckptdir DIR    where checkpoints go (env WINCKPT_CHECKPOINT_DIR, default .)
 ```
 
-`app.exe` and `arena.ckpt` are read from the working directory. A checkpoint, a restart,
-a second checkpoint and a second restart:
+The program receives `args` as its own command line. Its checkpoint is
+`ckpt_<program>_<pid>.wckpt`; a restarted program writes its next checkpoint to the same
+file. A checkpoint, a restart, a second checkpoint and a second restart:
 
 ```
 cd build\bin\x64\Release
-winckpt.exe -k
-restarter.exe -k
-restarter.exe
+winckpt.exe -k app.exe
+restarter.exe -k ckpt_app_<pid>.wckpt
+restarter.exe ckpt_app_<pid>.wckpt
 ```
 
 The combined output is identical to an uninterrupted run.

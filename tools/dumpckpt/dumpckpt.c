@@ -1,57 +1,40 @@
 #include <windows.h>
 #include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 
 #include "ckpt_format.h"
 #include "winckpt_api.h"
 
-#define CKPT_PATH  DEFAULT_CKPT_PATH
-#define APP_PATH   DEFAULT_APP_PATH
-
-static BYTE *read_whole(const char *path, DWORD *out_size)
+static int app_image_size(const Snapshot *s, ULONGLONG *size_image)
 {
-    HANDLE h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
-                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h == INVALID_HANDLE_VALUE) {
-        fprintf(stderr, "dumpckpt: cannot open %s, err=%lu\n", path, GetLastError());
-        return NULL;
+    for (ULONGLONG i = 0; i < s->count; i++) {
+        const RegionRec *r = &s->rg[i];
+        if (r->base != s->arena_start) continue;
+        const BYTE *hdr = s->bytes + r->off;
+        const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)hdr;
+        if (r->size < sizeof(*dos) || dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew < 0 ||
+            (ULONGLONG)dos->e_lfanew + sizeof(IMAGE_NT_HEADERS64) > r->size)
+            return 0;
+        const IMAGE_NT_HEADERS64 *nt = (const IMAGE_NT_HEADERS64 *)(hdr + dos->e_lfanew);
+        if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
+        *size_image = nt->OptionalHeader.SizeOfImage;
+        return 1;
     }
-    DWORD size = GetFileSize(h, NULL);
-    BYTE *buf = (BYTE *)malloc(size);
-    DWORD got = 0;
-    if (!buf || !ReadFile(h, buf, size, &got, NULL) || got != size) {
-        fprintf(stderr, "dumpckpt: read failed on %s, err=%lu\n", path, GetLastError());
-        CloseHandle(h); free(buf); return NULL;
-    }
-    CloseHandle(h);
-    *out_size = size;
-    return buf;
+    return 0;
 }
 
-static int app_image_range(ULONGLONG *lo, ULONGLONG *hi)
+int main(int argc, char **argv)
 {
-    DWORD size = 0;
-    BYTE *f = read_whole(APP_PATH, &size);
-    if (!f) return 0;
-    IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)f;
-    if (size < sizeof(*dos) || dos->e_magic != IMAGE_DOS_SIGNATURE) { free(f); return 0; }
-    IMAGE_NT_HEADERS64 *nt = (IMAGE_NT_HEADERS64 *)(f + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE) { free(f); return 0; }
-    *lo = nt->OptionalHeader.ImageBase;
-    *hi = *lo + nt->OptionalHeader.SizeOfImage;
-    free(f);
-    return 1;
-}
-
-int main(void)
-{
+    if (argc != 2) {
+        fprintf(stderr, "usage: dumpckpt.exe <ckpt%s>\n", CKPT_SUFFIX);
+        return 1;
+    }
     Snapshot s;
-    if (!ckpt_read(CKPT_PATH, &s)) return 1;
+    if (!ckpt_read(argv[1], &s)) return 1;
 
-    printf("header: magic=WCKPT002 arena_start=0x%llX regions=%llu "
+    printf("header: magic=WCKPT003 arena_start=0x%llX regions=%llu "
            "context_present=%llu total_bytes=%llu\n",
            s.arena_start, s.count, s.context_present, s.total);
+    printf("app:    %s\n", s.app_path);
 
     ULONGLONG stack_base = 0, stack_size = 0;
     int stack_regions = 0;
@@ -82,8 +65,9 @@ int main(void)
         printf("context: none\n");
     }
 
-    ULONGLONG app_lo = 0, app_hi = 0;
-    int have_app = app_image_range(&app_lo, &app_hi);
+    ULONGLONG size_image = 0;
+    int have_app = app_image_size(&s, &size_image);
+    ULONGLONG app_lo = s.arena_start, app_hi = s.arena_start + size_image;
 
     printf("\nVERIFY\n");
     int ok = 1;
@@ -94,7 +78,7 @@ int main(void)
                app_lo, app_hi, a ? "PASS" : "FAIL");
         ok &= a;
     } else {
-        printf("  [A] app image range unavailable (app.exe not readable): SKIP\n");
+        printf("  [A] no valid app header at the arena base: FAIL\n");
         ok = 0;
     }
 

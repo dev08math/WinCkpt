@@ -48,26 +48,50 @@ typedef struct ProcParams {
 
 static WCHAR g_main_path[MAX_PATH];
 
-static BYTE *read_file(const char *path, DWORD *out_size)
+BYTE *loader_read_file(const char *path, DWORD *out_size)
 {
     HANDLE h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) {
-        fprintf(stderr, "loader: CreateFileA(%s) failed, err=%lu\n", path, GetLastError());
+        fprintf(stderr, "read: CreateFileA(%s) failed, err=%lu\n", path, GetLastError());
         return NULL;
     }
-    DWORD size = GetFileSize(h, NULL);
-    BYTE *buf = (BYTE *)malloc(size);
+    LARGE_INTEGER size;
+    if (!GetFileSizeEx(h, &size) || size.QuadPart > MAXDWORD) {
+        fprintf(stderr, "read: %s: size unreadable or over 4 GB\n", path);
+        CloseHandle(h);
+        return NULL;
+    }
+    BYTE *buf = (BYTE *)malloc(size.QuadPart ? (size_t)size.QuadPart : 1);
     DWORD got = 0;
-    if (!buf || !ReadFile(h, buf, size, &got, NULL) || got != size) {
-        fprintf(stderr, "loader: ReadFile(%s) failed, err=%lu\n", path, GetLastError());
+    if (!buf || !ReadFile(h, buf, size.LowPart, &got, NULL) || got != size.LowPart) {
+        fprintf(stderr, "read: ReadFile(%s) failed, err=%lu\n", path, GetLastError());
         CloseHandle(h);
         free(buf);
         return NULL;
     }
     CloseHandle(h);
-    *out_size = size;
+    *out_size = size.LowPart;
     return buf;
+}
+
+static IMAGE_NT_HEADERS64 *pe_headers(const BYTE *file, DWORD size)
+{
+    if (size < sizeof(IMAGE_DOS_HEADER)) return NULL;
+    const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)file;
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew < 0 ||
+        (ULONGLONG)dos->e_lfanew + sizeof(IMAGE_NT_HEADERS64) > size)
+        return NULL;
+    IMAGE_NT_HEADERS64 *nt = (IMAGE_NT_HEADERS64 *)(file + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE ||
+        nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+        return NULL;
+    ULONGLONG sec_end = (ULONGLONG)((BYTE *)IMAGE_FIRST_SECTION(nt) - file)
+                      + (ULONGLONG)nt->FileHeader.NumberOfSections * sizeof(IMAGE_SECTION_HEADER);
+    if (sec_end > size || nt->OptionalHeader.SizeOfHeaders > size ||
+        nt->OptionalHeader.SizeOfHeaders > nt->OptionalHeader.SizeOfImage)
+        return NULL;
+    return nt;
 }
 
 static int apply_relocations(Image *img, ULONGLONG delta)
@@ -79,12 +103,17 @@ static int apply_relocations(Image *img, ULONGLONG delta)
         return 0;
     }
 
+    ULONGLONG size_image = img->nt->OptionalHeader.SizeOfImage;
+    if ((ULONGLONG)dir.VirtualAddress + dir.Size > size_image) {
+        fprintf(stderr, "loader: %s: .reloc runs past the image\n", img->name);
+        return 0;
+    }
     BYTE *ptr = img->base + dir.VirtualAddress;
     BYTE *end = ptr + dir.Size;
     ULONGLONG n = 0;
-    while (ptr < end) {
+    while (ptr + sizeof(IMAGE_BASE_RELOCATION) <= end) {
         IMAGE_BASE_RELOCATION *blk = (IMAGE_BASE_RELOCATION *)ptr;
-        if (blk->SizeOfBlock < sizeof(IMAGE_BASE_RELOCATION)) {
+        if (blk->SizeOfBlock < sizeof(IMAGE_BASE_RELOCATION) || blk->SizeOfBlock > (ULONGLONG)(end - ptr)) {
             fprintf(stderr, "loader: %s: bad reloc block size %lu\n", img->name, blk->SizeOfBlock);
             return 0;
         }
@@ -96,6 +125,11 @@ static int apply_relocations(Image *img, ULONGLONG delta)
             if (type == IMAGE_REL_BASED_ABSOLUTE) continue;
             if (type != IMAGE_REL_BASED_DIR64) {
                 fprintf(stderr, "loader: %s: unhandled reloc type %u\n", img->name, type);
+                return 0;
+            }
+            if ((ULONGLONG)blk->VirtualAddress + off + sizeof(ULONGLONG) > size_image) {
+                fprintf(stderr, "loader: %s: reloc at 0x%lX past the image\n",
+                        img->name, blk->VirtualAddress + off);
                 return 0;
             }
             *(ULONGLONG *)(img->base + blk->VirtualAddress + off) += delta;
@@ -116,19 +150,28 @@ void loader_attach(Image *img, ULONGLONG at)
 int loader_map(Image *img, const char *path, ULONGLONG at)
 {
     DWORD size = 0;
-    BYTE *file = read_file(path, &size);
+    BYTE *file = loader_read_file(path, &size);
     if (!file) return 0;
 
-    IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)file;
-    IMAGE_NT_HEADERS64 *nt = (IMAGE_NT_HEADERS64 *)(file + dos->e_lfanew);
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE || nt->Signature != IMAGE_NT_SIGNATURE ||
-        nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
-        fprintf(stderr, "loader: %s is not a PE32+ image\n", path);
+    IMAGE_NT_HEADERS64 *nt = pe_headers(file, size);
+    if (!nt) {
+        fprintf(stderr, "loader: %s is not a valid PE32+ image\n", path);
         free(file);
         return 0;
     }
 
     DWORD size_image = nt->OptionalHeader.SizeOfImage;
+    IMAGE_SECTION_HEADER *sec = IMAGE_FIRST_SECTION(nt);
+    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; i++) {
+        if ((ULONGLONG)sec[i].PointerToRawData + sec[i].SizeOfRawData > size ||
+            (ULONGLONG)sec[i].VirtualAddress + sec[i].SizeOfRawData > size_image) {
+            fprintf(stderr, "loader: %s: section %.8s runs past the file or the image\n",
+                    path, sec[i].Name);
+            free(file);
+            return 0;
+        }
+    }
+
     BYTE *base = (BYTE *)VirtualAlloc((LPVOID)at, size_image, MEM_COMMIT, PAGE_READWRITE);
     if (base == NULL || (ULONGLONG)base != at) {
         fprintf(stderr, "loader: %s: commit at 0x%llX failed, err=%lu\n", path, at, GetLastError());
@@ -137,15 +180,8 @@ int loader_map(Image *img, const char *path, ULONGLONG at)
     }
 
     memcpy(base, file, nt->OptionalHeader.SizeOfHeaders);
-    IMAGE_SECTION_HEADER *sec = IMAGE_FIRST_SECTION(nt);
-    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; i++) {
-        if ((ULONGLONG)sec[i].PointerToRawData + sec[i].SizeOfRawData > size) {
-            fprintf(stderr, "loader: %s: section %.8s runs past end of file\n", path, sec[i].Name);
-            free(file);
-            return 0;
-        }
+    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; i++)
         memcpy(base + sec[i].VirtualAddress, file + sec[i].PointerToRawData, sec[i].SizeOfRawData);
-    }
     free(file);
 
     loader_attach(img, at);
@@ -157,9 +193,14 @@ int loader_map(Image *img, const char *path, ULONGLONG at)
     return 1;
 }
 
+static const char *dll_alias(const char *dll)
+{
+    return _strnicmp(dll, "api-ms-win-crt-", 15) == 0 ? "ucrtbase.dll" : dll;
+}
+
 static Image *mapped_for(const char *dll, Image **mapped, int n_mapped)
 {
-    const char *want = _strnicmp(dll, "api-ms-win-crt-", 15) == 0 ? "ucrtbase.dll" : dll;
+    const char *want = dll_alias(dll);
     for (int i = 0; i < n_mapped; i++)
         if (_stricmp(mapped[i]->name, want) == 0) return mapped[i];
     return NULL;
@@ -220,7 +261,7 @@ int loader_imports(const Image *img, const char *dll)
     if (dir.VirtualAddress == 0) return 0;
     IMAGE_IMPORT_DESCRIPTOR *desc = (IMAGE_IMPORT_DESCRIPTOR *)(img->base + dir.VirtualAddress);
     for (; desc->Name != 0; desc++)
-        if (_stricmp((const char *)(img->base + desc->Name), dll) == 0) return 1;
+        if (_stricmp(dll_alias((const char *)(img->base + desc->Name)), dll) == 0) return 1;
     return 0;
 }
 
@@ -348,7 +389,11 @@ int loader_run_tls(const Image *img, DWORD reason)
     if (dir.VirtualAddress == 0 || dir.Size == 0) return 1;
 
     IMAGE_TLS_DIRECTORY64 *tls = (IMAGE_TLS_DIRECTORY64 *)(img->base + dir.VirtualAddress);
-    if (tls->EndAddressOfRawData != tls->StartAddressOfRawData || tls->SizeOfZeroFill != 0) {
+    // The CRT's tlssup.cpp always defines `char _tls_start` at the start of the template,
+    // so an image with TLS callbacks and no TLS variables still has 1 byte of TLS data.
+    ULONGLONG tls_bytes = tls->EndAddressOfRawData - tls->StartAddressOfRawData
+                        + tls->SizeOfZeroFill;
+    if (tls_bytes > sizeof(char)) {
         fprintf(stderr, "loader: %s uses static TLS (__declspec(thread)), not supported\n",
                 img->name);
         return 0;

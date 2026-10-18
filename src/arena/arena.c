@@ -4,7 +4,7 @@
 //
 // TODO: minimal on purpose, with known defects.
 //   - not thread safe: g_ctl and the free list are unlocked, which breaks as
-//     soon as the checkpoint listener thread exists
+//     soon as the checkpoint thread exists
 //   - no coalescing: adjacent free blocks never merge, so external
 //     fragmentation grows without bound
 //   - no splitting: a free block is reused whole, so malloc(16) can consume a

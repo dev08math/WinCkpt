@@ -12,11 +12,12 @@ static int    g_exit_after_ckpt;
 static LPVOID g_reserve_got;
 static DWORD  g_reserve_err;
 
-static Image  g_app  = { "app.exe" };
+static char   g_app_path[MAX_PATH];
+static char   g_ckpt_path[MAX_PATH];
+static Image  g_app;
 static Image  g_ucrt = { "ucrtbase.dll" };
 static Image  g_vcrt = { "vcruntime140.dll" };
 static Image *g_crt_copies[2];
-static Image *g_detach_order[2];
 static int    g_n_crt;
 
 // A TLS callback runs before CRT startup, so the CRT cannot take the range first.
@@ -86,18 +87,8 @@ static int vcrt_pasted(const Snapshot *s)
     return 0;
 }
 
-static int fill(Image *img)
-{
-    if (!loader_fill_imports(img, g_crt_copies, g_n_crt, winckpt_hook_lookup)) return 0;
-    winckpt_hook_report(img->name);
-    return loader_protect(img);
-}
-
 static int adopt(void)
 {
-    for (int i = 0; i < g_n_crt; i++)
-        g_detach_order[i] = g_crt_copies[g_n_crt - 1 - i];
-
     winckpt_arena a;
     memset(&a, 0, sizeof a);
     a.base        = ARENA_BASE;
@@ -111,8 +102,11 @@ static int adopt(void)
     a.emu_at      = ARENA_BASE + EMU_OFF;
     a.verbose     = g_verbose;
     a.exit_after_ckpt = g_exit_after_ckpt;
-    a.detach      = g_detach_order;
-    a.n_detach    = g_n_crt;
+    a.crt         = g_crt_copies;
+    a.n_crt       = g_n_crt;
+    a.app         = &g_app;
+    a.app_path    = g_app_path;
+    a.ckpt_path   = g_ckpt_path;
     if (!DuplicateHandle(GetCurrentProcess(), GetCurrentThread(),
                          GetCurrentProcess(), &a.app_thread,
                          THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, 0)) {
@@ -122,21 +116,28 @@ static int adopt(void)
     return winckpt_adopt(&a);
 }
 
-static void resume(CONTEXT *ctx)
-{
-    NT_TIB *tib = (NT_TIB *)NtCurrentTeb();
-    tib->StackBase  = (void *)(ARENA_BASE + APP_STACK_OFF + APP_STACK_SIZE);
-    tib->StackLimit = (void *)(ARENA_BASE + APP_STACK_OFF);
-    RtlRestoreContext(ctx, NULL);
-}
-
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
 
+    const char *ckpt = NULL;
+    int bad = 0;
     for (int i = 1; i < argc; i++)
         if (!strcmp(argv[i], "-v")) g_verbose = 1;
         else if (!strcmp(argv[i], "-k")) g_exit_after_ckpt = 1;
+        else if (argv[i][0] != '-' && !ckpt) ckpt = argv[i];
+        else bad = 1;
+    size_t len = ckpt ? strlen(ckpt) : 0;
+    if (bad || len < strlen(CKPT_SUFFIX)
+        || _stricmp(ckpt + len - strlen(CKPT_SUFFIX), CKPT_SUFFIX)) {
+        fprintf(stderr, "usage: restarter.exe [-v] [-k] <ckpt%s>\n", CKPT_SUFFIX);
+        return 1;
+    }
+    DWORD n = GetFullPathNameA(ckpt, sizeof g_ckpt_path, g_ckpt_path, NULL);
+    if (n == 0 || n >= sizeof g_ckpt_path) {
+        fprintf(stderr, "restart: %s: path too long or invalid\n", ckpt);
+        return 1;
+    }
 
     if (!g_reserve_got) {
         fprintf(stderr, "restart: arena reserve at 0x%llX failed, err=%lu\n",
@@ -146,12 +147,15 @@ int main(int argc, char **argv)
     }
 
     Snapshot s;
-    if (!ckpt_read(DEFAULT_CKPT_PATH, &s)) return 1;
+    if (!ckpt_read(g_ckpt_path, &s)) return 1;
     if (!s.context_present) {
-        fprintf(stderr, "restart: %s has no saved context\n", DEFAULT_CKPT_PATH);
+        fprintf(stderr, "restart: %s has no saved context\n", g_ckpt_path);
         snapshot_free(&s);
         return 1;
     }
+    strcpy(g_app_path, s.app_path);
+    const char *slash = strrchr(g_app_path, '\\');
+    g_app.name = slash ? slash + 1 : g_app_path;
     if (!check_regions(&s) || !paste_regions(&s)) {
         snapshot_free(&s);
         return 1;
@@ -159,7 +163,7 @@ int main(int argc, char **argv)
     CONTEXT ctx = s.ctx;
 
     loader_attach(&g_app, ARENA_BASE);
-    if (!loader_become_main(&g_app, DEFAULT_APP_PATH)) {
+    if (!loader_become_main(&g_app, g_app_path)) {
         snapshot_free(&s);
         return 1;
     }
@@ -173,14 +177,14 @@ int main(int argc, char **argv)
     snapshot_free(&s);
 
     for (int i = 0; i < g_n_crt; i++)
-        if (!fill(g_crt_copies[i])) return 1;
-    if (!fill(&g_app)) return 1;
+        if (!winckpt_fill(g_crt_copies[i], g_crt_copies, g_n_crt)) return 1;
+    if (!winckpt_fill(&g_app, g_crt_copies, g_n_crt)) return 1;
     if (!adopt()) return 1;
     if (!winckpt_rebind_std(&g_ucrt)) return 1;
 
     VLOG("restart: resuming at Rip=0x%llX Rsp=0x%llX\n", ctx.Rip, ctx.Rsp);
-    resume(&ctx);
+    winckpt_enter(&ctx);
 
-    fprintf(stderr, "restart: RtlRestoreContext returned -- unreachable\n");
+    fprintf(stderr, "restart: winckpt_enter returned -- unreachable\n");
     return 1;
 }

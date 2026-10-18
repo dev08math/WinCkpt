@@ -43,9 +43,9 @@ typedef struct Emu {
 
 typedef void (*exit_fn)(UINT code);
 
-int   boundary_init(ULONGLONG emu_at);
+int   boundary_init(ULONGLONG emu_at, const WCHAR *cmdline);
 int   boundary_adopt(ULONGLONG emu_at);
-void  boundary_on_exit(Image **detach_order, int n, exit_fn on_exit);
+void  boundary_on_exit(Image **crt, int n_crt, const Image *app, exit_fn on_exit);
 void *boundary_hook(const char *import_name);
 void  boundary_report(const char *module);
 int   boundary_rebind_std(const Image *ucrt);

@@ -6,7 +6,6 @@
 #include "winckpt_api.h"
 
 // Heap metadata, stored in the arena.
-// Addresses are absolute and may need to become relative.
 typedef struct heap_ctl {
     ULONGLONG cur;
     ULONGLONG committed;

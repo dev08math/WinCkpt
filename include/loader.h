@@ -12,6 +12,7 @@ typedef struct Image {
 // Returns a replacement for an import from an OS DLL, or NULL to bind the real one.
 typedef void *(*hook_lookup_fn)(const char *import_name);
 
+BYTE *loader_read_file(const char *path, DWORD *out_size);
 int   loader_map(Image *img, const char *path, ULONGLONG at);
 void  loader_attach(Image *img, ULONGLONG at);
 int   loader_imports(const Image *img, const char *dll);

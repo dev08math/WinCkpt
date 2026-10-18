@@ -17,8 +17,9 @@
 #include "log.h"
 
 static Emu     *g_emu;
-static Image  **g_detach;
-static int      g_n_detach;
+static Image  **g_crt;
+static int      g_n_crt;
+static const Image *g_app;
 static exit_fn  g_on_exit;
 
 static const char *g_unhandled[] = {
@@ -47,7 +48,22 @@ static int  protect_stubs(void);
 static void write_stubs(void);
 static int  refresh_modules_and_procs(void);
 
-int boundary_init(ULONGLONG emu_at)
+static int set_cmdline(const WCHAR *w)
+{
+    size_t nw = (wcslen(w) + 1) * sizeof(WCHAR);
+    int na = WideCharToMultiByte(CP_ACP, 0, w, -1, NULL, 0, NULL, NULL);
+    g_emu->cmdline_w = (WCHAR *)arena_malloc(nw);
+    g_emu->cmdline_a = na > 0 ? (char *)arena_malloc((size_t)na) : NULL;
+    if (!g_emu->cmdline_w || !g_emu->cmdline_a) {
+        fprintf(stderr, "boundary: command line copy failed, err=%lu\n", GetLastError());
+        return 0;
+    }
+    memcpy(g_emu->cmdline_w, w, nw);
+    WideCharToMultiByte(CP_ACP, 0, w, -1, g_emu->cmdline_a, na, NULL, NULL);
+    return 1;
+}
+
+int boundary_init(ULONGLONG emu_at, const WCHAR *cmdline)
 {
     if (sizeof(Emu) > STUB_OFF) {
         fprintf(stderr, "boundary: Emu is %zu bytes, room is %llu\n", sizeof(Emu), STUB_OFF);
@@ -59,6 +75,7 @@ int boundary_init(ULONGLONG emu_at)
     }
     g_emu = (Emu *)emu_at;
     memset(g_emu, 0, sizeof *g_emu);
+    if (!set_cmdline(cmdline)) return 0;
     write_stubs();
     return protect_stubs();
 }
@@ -69,19 +86,21 @@ int boundary_adopt(ULONGLONG emu_at)
     return protect_stubs() && refresh_modules_and_procs();
 }
 
-void boundary_on_exit(Image **detach_order, int n, exit_fn on_exit)
+void boundary_on_exit(Image **crt, int n_crt, const Image *app, exit_fn on_exit)
 {
-    g_detach   = detach_order;
-    g_n_detach = n;
-    g_on_exit  = on_exit;
+    g_crt     = crt;
+    g_n_crt   = n_crt;
+    g_app     = app;
+    g_on_exit = on_exit;
 }
 
 static void WINAPI hook_ExitProcess(UINT code)
 {
-    // The CRT copies flush stdout and run their cleanup in DllMain(PROCESS_DETACH),
-    // which Windows never calls for images it did not load.
-    for (int i = 0; i < g_n_detach; i++)
-        loader_dll_main(g_detach[i], DLL_PROCESS_DETACH);
+    // Windows never sends PROCESS_DETACH to images it did not load. It runs the
+    // exe's TLS callbacks after the DLLs' DllMain, so the app's go last.
+    for (int i = g_n_crt - 1; i >= 0; i--)
+        loader_dll_main(g_crt[i], DLL_PROCESS_DETACH);
+    if (g_app) loader_run_tls(g_app, DLL_PROCESS_DETACH);
     if (g_on_exit) g_on_exit(code);
     ExitProcess(code);
 }
@@ -176,23 +195,11 @@ static BOOL WINAPI hook_TlsSetValue(DWORD i, LPVOID v)
 
 static LPSTR WINAPI hook_GetCommandLineA(void)
 {
-    if (!g_emu->cmdline_a) {
-        const char *src = GetCommandLineA();
-        size_t n = strlen(src) + 1;
-        g_emu->cmdline_a = (char *)arena_malloc(n);
-        if (g_emu->cmdline_a) memcpy(g_emu->cmdline_a, src, n);
-    }
     return g_emu->cmdline_a;
 }
 
 static LPWSTR WINAPI hook_GetCommandLineW(void)
 {
-    if (!g_emu->cmdline_w) {
-        const WCHAR *src = GetCommandLineW();
-        size_t n = (wcslen(src) + 1) * sizeof(WCHAR);
-        g_emu->cmdline_w = (WCHAR *)arena_malloc(n);
-        if (g_emu->cmdline_w) memcpy(g_emu->cmdline_w, src, n);
-    }
     return g_emu->cmdline_w;
 }
 

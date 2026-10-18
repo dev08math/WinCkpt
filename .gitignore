@@ -2,7 +2,7 @@ build/
 .vs/
 *.vcxproj.user
 
-*.ckpt
+*.wckpt
 
 *.obj
 *.pdb
