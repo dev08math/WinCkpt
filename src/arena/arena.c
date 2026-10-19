@@ -1,19 +1,3 @@
-// Bump allocator with a LIFO free list. It backs the Windows heap calls of the
-// upper half: the hooked GetProcessHeap hands out arena_heap_handle(), and any
-// other heap handle is passed through to the OS heap.
-//
-// TODO: minimal on purpose, with known defects.
-//   - not thread safe: g_ctl and the free list are unlocked, which breaks as
-//     soon as the checkpoint thread exists
-//   - no coalescing: adjacent free blocks never merge, so external
-//     fragmentation grows without bound
-//   - no splitting: a free block is reused whole, so malloc(16) can consume a
-//     4 KB block permanently
-//   - arena_free does not check the pointer belongs to the arena; a stray or
-//     double free corrupts the list
-//   - realloc never shrinks
-//   - 16 bytes of header per allocation, O(n) free-list scan, no decommit
-
 #include <windows.h>
 #include <stdio.h>
 #include <string.h>
@@ -30,7 +14,7 @@ static int ensure_committed(ULONGLONG upto)
 {
     if (upto <= g_ctl->committed) return 1;
     ULONGLONG want = (upto + (PAGE - 1)) & ~(PAGE - 1);
-    if (want > g_arena.heap_end) return 0;
+    if (want > g_arena.end) return 0;
     if (!VirtualAlloc((LPVOID)g_ctl->committed, (SIZE_T)(want - g_ctl->committed),
                       MEM_COMMIT, PAGE_READWRITE))
         return 0;
@@ -63,6 +47,11 @@ void arena_adopt(const winckpt_arena *a)
     g_ctl   = (heap_ctl *)g_arena.heap_start;
 }
 
+int arena_contains(ULONGLONG a)
+{
+    return a >= g_arena.base && a < g_arena.end;
+}
+
 void arena_dump_ctl(const char *when)
 {
     printf("arena: heap_ctl %s -- cur=0x%llX committed=0x%llX free_head=0x%llX\n",
@@ -71,8 +60,6 @@ void arena_dump_ctl(const char *when)
 
 void *arena_malloc(size_t n)
 {
-    // Round up to 16 so the returned pointer is 16-aligned, which is what
-    // malloc must guarantee on x64.
     size_t need = (n + 15) & ~(size_t)15;
     if (need == 0) need = 16;
 
@@ -145,30 +132,28 @@ void *arena_calloc(size_t count, size_t sz)
     return p;
 }
 
-HANDLE WINAPI arena_heap_handle(void)
+void *arena_copy(const void *src, size_t n)
+{
+    void *p = arena_malloc(n);
+    if (p) memcpy(p, src, n);
+    return p;
+}
+
+HANDLE arena_heap(void)
 {
     return (HANDLE)g_ctl;
 }
 
-LPVOID WINAPI arena_heap_alloc(HANDLE heap, DWORD flags, SIZE_T n)
+void *arena_heap_alloc(DWORD flags, size_t n)
 {
-    if (heap != arena_heap_handle()) return HeapAlloc(heap, flags, n);
     void *p = arena_malloc(n);
     if (p && (flags & HEAP_ZERO_MEMORY))
         memset(p, 0, ((Block *)((char *)p - HDR))->size);
     return p;
 }
 
-BOOL WINAPI arena_heap_free(HANDLE heap, DWORD flags, LPVOID p)
+void *arena_heap_realloc(DWORD flags, void *p, size_t n)
 {
-    if (heap != arena_heap_handle()) return HeapFree(heap, flags, p);
-    arena_free(p);
-    return TRUE;
-}
-
-LPVOID WINAPI arena_heap_realloc(HANDLE heap, DWORD flags, LPVOID p, SIZE_T n)
-{
-    if (heap != arena_heap_handle()) return HeapReAlloc(heap, flags, p, n);
     if (!p) return NULL;
 
     Block *b = (Block *)((char *)p - HDR);
@@ -190,9 +175,7 @@ LPVOID WINAPI arena_heap_realloc(HANDLE heap, DWORD flags, LPVOID p, SIZE_T n)
     return q;
 }
 
-SIZE_T WINAPI arena_heap_size(HANDLE heap, DWORD flags, LPCVOID p)
+size_t arena_size(const void *p)
 {
-    if (heap != arena_heap_handle()) return HeapSize(heap, flags, p);
-    if (!p) return (SIZE_T)-1;
     return ((const Block *)((const char *)p - HDR))->used;
 }

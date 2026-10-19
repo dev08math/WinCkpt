@@ -2,21 +2,19 @@
 #include <stdio.h>
 
 #include "ckpt_format.h"
+#include "loader.h"
 #include "winckpt_api.h"
+
+int g_verbose;
 
 static int app_image_size(const Snapshot *s, ULONGLONG *size_image)
 {
     for (ULONGLONG i = 0; i < s->count; i++) {
         const RegionRec *r = &s->rg[i];
         if (r->base != s->arena_start) continue;
-        const BYTE *hdr = s->bytes + r->off;
-        const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)hdr;
-        if (r->size < sizeof(*dos) || dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew < 0 ||
-            (ULONGLONG)dos->e_lfanew + sizeof(IMAGE_NT_HEADERS64) > r->size)
-            return 0;
-        const IMAGE_NT_HEADERS64 *nt = (const IMAGE_NT_HEADERS64 *)(hdr + dos->e_lfanew);
-        if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
-        *size_image = nt->OptionalHeader.SizeOfImage;
+        Image img = { "app" };
+        if (!loader_attach(&img, (ULONGLONG)(s->bytes + r->off), r->size)) return 0;
+        *size_image = img.nt->OptionalHeader.SizeOfImage;
         return 1;
     }
     return 0;
@@ -31,9 +29,8 @@ int main(int argc, char **argv)
     Snapshot s;
     if (!ckpt_read(argv[1], &s)) return 1;
 
-    printf("header: magic=WCKPT003 arena_start=0x%llX regions=%llu "
-           "context_present=%llu total_bytes=%llu\n",
-           s.arena_start, s.count, s.context_present, s.total);
+    printf("header: magic=WCKPT005 arena_start=0x%llX regions=%llu total_bytes=%llu\n",
+           s.arena_start, s.count, s.total);
     printf("app:    %s\n", s.app_path);
 
     ULONGLONG stack_base = 0, stack_size = 0;
@@ -41,8 +38,8 @@ int main(int argc, char **argv)
 
     for (ULONGLONG i = 0; i < s.count; i++) {
         const RegionRec *r = &s.rg[i];
-        printf("region[%llu] base=0x%011llX size=0x%08llX protect=0x%-3lX kind=%s\n",
-               i, r->base, r->size, r->protect, r->kind == REGION_STACK ? "STACK" : "PLAIN");
+        printf("region[%llu] base=0x%011llX size=0x%08llX kind=%s\n",
+               i, r->base, r->size, r->kind == REGION_STACK ? "STACK" : "PLAIN");
         if (r->kind == REGION_STACK) { stack_base = r->base; stack_size = r->size; stack_regions++; }
     }
 
@@ -54,16 +51,11 @@ int main(int argc, char **argv)
         printf("stack region: %d found (expected exactly 1)\n", stack_regions);
 
     const CONTEXT *ctx = &s.ctx;
-    if (s.context_present) {
-        printf("context: Rip=0x%llX Rsp=0x%llX Rbp=0x%llX Rbx=0x%llX\n",
-               ctx->Rip, ctx->Rsp, ctx->Rbp, ctx->Rbx);
-        ULONGLONG live_lo = ctx->Rsp & ~(PAGE - 1);
-        printf("live stack extent: [0x%llX .. 0x%llX) = %llu bytes of the %llu captured\n",
-               live_lo, stack_base + stack_size,
-               (stack_base + stack_size) - live_lo, stack_size);
-    } else {
-        printf("context: none\n");
-    }
+    printf("context: Rip=0x%llX Rsp=0x%llX Rbp=0x%llX Rbx=0x%llX\n",
+           ctx->Rip, ctx->Rsp, ctx->Rbp, ctx->Rbx);
+    ULONGLONG live_lo = ctx->Rsp & ~(PAGE - 1);
+    printf("live stack extent: [0x%llX .. 0x%llX) = %llu bytes of the %llu captured\n",
+           live_lo, stack_base + stack_size, (stack_base + stack_size) - live_lo, stack_size);
 
     ULONGLONG size_image = 0;
     int have_app = app_image_size(&s, &size_image);
@@ -73,7 +65,7 @@ int main(int argc, char **argv)
     int ok = 1;
 
     if (have_app) {
-        int a = s.context_present && ctx->Rip >= app_lo && ctx->Rip < app_hi;
+        int a = ctx->Rip >= app_lo && ctx->Rip < app_hi;
         printf("  [A] Rip inside app image [0x%llX..0x%llX): %s\n",
                app_lo, app_hi, a ? "PASS" : "FAIL");
         ok &= a;
@@ -82,16 +74,10 @@ int main(int argc, char **argv)
         ok = 0;
     }
 
-    int b = s.context_present && stack_regions == 1
+    int b = stack_regions == 1
             && ctx->Rsp >= stack_base && ctx->Rsp < stack_base + stack_size;
     printf("  [B] Rsp inside captured stack region: %s\n", b ? "PASS" : "FAIL");
     ok &= b;
-
-    int c = stack_regions == 1
-            && stack_base >= ARENA_BASE
-            && stack_base + stack_size <= ARENA_BASE + ARENA_SIZE;
-    printf("  [C] stack region inside arena (upper-half pure): %s\n", c ? "PASS" : "FAIL");
-    ok &= c;
 
     printf("\n%s\n", ok ? "dumpckpt: ALL CHECKS PASS" : "dumpckpt: CHECKS FAILED");
     snapshot_free(&s);

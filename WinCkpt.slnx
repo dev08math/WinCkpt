@@ -6,6 +6,9 @@
     <Project Path="src/arena/arena.vcxproj" Id="a1e00001-0000-4000-8000-00000000a001" />
     <Project Path="src/loader/loader.vcxproj" Id="a1e00007-0000-4000-8000-00000000a007" />
     <Project Path="src/boundary/boundary.vcxproj" Id="a1e00008-0000-4000-8000-00000000a008" />
+    <Project Path="src/handles/handles.vcxproj" Id="a1e00009-0000-4000-8000-00000000a009" />
+    <Project Path="src/process/process.vcxproj" Id="a1e0000a-0000-4000-8000-00000000a00a" />
+    <Project Path="src/modules/modules.vcxproj" Id="a1e0000b-0000-4000-8000-00000000a00b" />
     <Project Path="src/checkpoint/winckpt_api.vcxproj" Id="a1e00002-0000-4000-8000-00000000a002" />
     <Project Path="src/launch/winckpt.vcxproj" Id="a1e00003-0000-4000-8000-00000000a003" />
     <Project Path="src/restart/restarter.vcxproj" Id="a1e00005-0000-4000-8000-00000000a005" />

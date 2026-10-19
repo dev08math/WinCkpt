@@ -7,8 +7,7 @@
 #include "loader.h"
 #include "log.h"
 
-// Undocumented x64 layouts of PEB, PEB_LDR_DATA, LDR_DATA_TABLE_ENTRY and
-// RTL_USER_PROCESS_PARAMETERS, cut down to the fields loader_become_main writes.
+// Undocumented x64 layouts, cut down to the fields loader_become_main writes.
 typedef struct UStr {
     USHORT len;
     USHORT max;
@@ -141,10 +140,13 @@ static int apply_relocations(Image *img, ULONGLONG delta)
     return 1;
 }
 
-void loader_attach(Image *img, ULONGLONG at)
+int loader_attach(Image *img, ULONGLONG at, ULONGLONG size)
 {
+    IMAGE_NT_HEADERS64 *nt = pe_headers((BYTE *)at, size > MAXDWORD ? MAXDWORD : (DWORD)size);
+    if (!nt) return 0;
     img->base = (BYTE *)at;
-    img->nt = (IMAGE_NT_HEADERS64 *)(img->base + ((IMAGE_DOS_HEADER *)img->base)->e_lfanew);
+    img->nt   = nt;
+    return 1;
 }
 
 int loader_map(Image *img, const char *path, ULONGLONG at)
@@ -184,7 +186,7 @@ int loader_map(Image *img, const char *path, ULONGLONG at)
         memcpy(base + sec[i].VirtualAddress, file + sec[i].PointerToRawData, sec[i].SizeOfRawData);
     free(file);
 
-    loader_attach(img, at);
+    loader_attach(img, at, size_image);
     ULONGLONG delta = at - img->nt->OptionalHeader.ImageBase;
     if (delta != 0 && !apply_relocations(img, delta)) return 0;
     img->nt->OptionalHeader.ImageBase = at;
@@ -231,7 +233,6 @@ static void *export_of(const Image *img, const char *name, WORD ordinal,
     if (rva < dir.VirtualAddress || rva >= dir.VirtualAddress + dir.Size)
         return img->base + rva;
 
-    // A forwarder: the export is "MODULE.name" or "MODULE.#ordinal".
     const char *fwd = (const char *)(img->base + rva);
     const char *dot = strchr(fwd, '.');
     if (!dot) return NULL;
@@ -335,8 +336,7 @@ int loader_protect(Image *img)
         }
     }
 
-    // Exception dispatch and unwinding find function tables only for images the OS
-    // loader knows about, so a hand-mapped image must register its .pdata itself.
+    // Exception dispatch finds .pdata only for images Windows itself loaded.
     IMAGE_DATA_DIRECTORY pdata = img->nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
     if (pdata.Size != 0 &&
         !RtlAddFunctionTable((PRUNTIME_FUNCTION)(img->base + pdata.VirtualAddress),
@@ -389,8 +389,7 @@ int loader_run_tls(const Image *img, DWORD reason)
     if (dir.VirtualAddress == 0 || dir.Size == 0) return 1;
 
     IMAGE_TLS_DIRECTORY64 *tls = (IMAGE_TLS_DIRECTORY64 *)(img->base + dir.VirtualAddress);
-    // The CRT's tlssup.cpp always defines `char _tls_start` at the start of the template,
-    // so an image with TLS callbacks and no TLS variables still has 1 byte of TLS data.
+    // tlssup.cpp always defines char _tls_start: TLS callbacks alone give 1 byte of TLS data.
     ULONGLONG tls_bytes = tls->EndAddressOfRawData - tls->StartAddressOfRawData
                         + tls->SizeOfZeroFill;
     if (tls_bytes > sizeof(char)) {

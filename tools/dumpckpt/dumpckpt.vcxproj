@@ -37,6 +37,7 @@
 
   <ItemGroup>
     <ProjectReference Include="$(RepoRoot)src\checkpoint\winckpt_api.vcxproj" />
+    <ProjectReference Include="$(RepoRoot)src\loader\loader.vcxproj" />
   </ItemGroup>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

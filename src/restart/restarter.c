@@ -51,19 +51,6 @@ static void report_conflict(void)
     }
 }
 
-static int check_regions(const Snapshot *s)
-{
-    for (ULONGLONG i = 0; i < s->count; i++) {
-        const RegionRec *r = &s->rg[i];
-        if (r->base < ARENA_BASE || r->size > ARENA_BASE + ARENA_SIZE - r->base) {
-            fprintf(stderr, "restart: region[%llu] 0x%llX+0x%llX outside the arena\n",
-                    i, r->base, r->size);
-            return 0;
-        }
-    }
-    return 1;
-}
-
 static int paste_regions(const Snapshot *s)
 {
     for (ULONGLONG i = 0; i < s->count; i++) {
@@ -80,41 +67,34 @@ static int paste_regions(const Snapshot *s)
     return 1;
 }
 
-static int vcrt_pasted(const Snapshot *s)
+static ULONGLONG region_at(const Snapshot *s, ULONGLONG at)
 {
     for (ULONGLONG i = 0; i < s->count; i++)
-        if (s->rg[i].base == ARENA_BASE + VCRT_OFF) return 1;
+        if (s->rg[i].base == at) return s->rg[i].size;
     return 0;
 }
 
-static int adopt(void)
+static int attach(Image *img, const Snapshot *s, ULONGLONG at)
 {
-    winckpt_arena a;
-    memset(&a, 0, sizeof a);
-    a.base        = ARENA_BASE;
-    a.end         = ARENA_BASE + ARENA_SIZE;
-    a.heap_start  = ARENA_BASE + HEAP_OFF;
-    a.heap_end    = a.end;
-    a.stack_limit = ARENA_BASE + APP_STACK_OFF;
-    a.stack_base  = a.stack_limit + APP_STACK_SIZE;
-    a.app_base    = (ULONGLONG)g_app.base;
-    a.app_end     = a.app_base + g_app.nt->OptionalHeader.SizeOfImage;
-    a.emu_at      = ARENA_BASE + EMU_OFF;
-    a.verbose     = g_verbose;
-    a.exit_after_ckpt = g_exit_after_ckpt;
-    a.crt         = g_crt_copies;
-    a.n_crt       = g_n_crt;
-    a.app         = &g_app;
-    a.app_path    = g_app_path;
-    a.ckpt_path   = g_ckpt_path;
-    if (!DuplicateHandle(GetCurrentProcess(), GetCurrentThread(),
-                         GetCurrentProcess(), &a.app_thread,
-                         THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, 0)) {
-        fprintf(stderr, "restart: DuplicateHandle failed, err=%lu\n", GetLastError());
-        return 0;
-    }
-    return winckpt_adopt(&a);
+    if (loader_attach(img, at, region_at(s, at))) return 1;
+    fprintf(stderr, "restart: no valid %s headers at 0x%llX in the checkpoint, refused\n",
+            img->name, at);
+    return 0;
 }
+
+static int attach_images(const Snapshot *s)
+{
+    if (!attach(&g_app, s, ARENA_BASE) || !loader_become_main(&g_app, g_app_path))
+        return 0;
+    if (!attach(&g_ucrt, s, ARENA_BASE + UCRT_OFF)) return 0;
+    g_crt_copies[g_n_crt++] = &g_ucrt;
+    if (region_at(s, ARENA_BASE + VCRT_OFF)) {
+        if (!attach(&g_vcrt, s, ARENA_BASE + VCRT_OFF)) return 0;
+        g_crt_copies[g_n_crt++] = &g_vcrt;
+    }
+    return 1;
+}
+
 
 int main(int argc, char **argv)
 {
@@ -148,39 +128,25 @@ int main(int argc, char **argv)
 
     Snapshot s;
     if (!ckpt_read(g_ckpt_path, &s)) return 1;
-    if (!s.context_present) {
-        fprintf(stderr, "restart: %s has no saved context\n", g_ckpt_path);
-        snapshot_free(&s);
-        return 1;
-    }
     strcpy(g_app_path, s.app_path);
     const char *slash = strrchr(g_app_path, '\\');
     g_app.name = slash ? slash + 1 : g_app_path;
-    if (!check_regions(&s) || !paste_regions(&s)) {
+    if (!paste_regions(&s)) {
         snapshot_free(&s);
         return 1;
     }
     CONTEXT ctx = s.ctx;
 
-    loader_attach(&g_app, ARENA_BASE);
-    if (!loader_become_main(&g_app, g_app_path)) {
+    if (!attach_images(&s)) {
         snapshot_free(&s);
         return 1;
-    }
-    loader_attach(&g_ucrt, ARENA_BASE + UCRT_OFF);
-    g_crt_copies[g_n_crt++] = &g_ucrt;
-    if (vcrt_pasted(&s)) {
-        loader_attach(&g_vcrt, ARENA_BASE + VCRT_OFF);
-        g_crt_copies[g_n_crt++] = &g_vcrt;
     }
     printf("restart: %llu regions, %llu bytes pasted; %d images\n", s.count, s.total, 1 + g_n_crt);
     snapshot_free(&s);
 
-    for (int i = 0; i < g_n_crt; i++)
-        if (!winckpt_fill(g_crt_copies[i], g_crt_copies, g_n_crt)) return 1;
-    if (!winckpt_fill(&g_app, g_crt_copies, g_n_crt)) return 1;
-    if (!adopt()) return 1;
-    if (!winckpt_rebind_std(&g_ucrt)) return 1;
+    winckpt_args a = { g_verbose, g_exit_after_ckpt, g_crt_copies, g_n_crt, &g_app,
+                       g_app_path, g_ckpt_path, NULL };
+    if (!winckpt_adopt(&a)) return 1;
 
     VLOG("restart: resuming at Rip=0x%llX Rsp=0x%llX\n", ctx.Rip, ctx.Rsp);
     winckpt_enter(&ctx);

@@ -10,10 +10,6 @@
 
 int g_verbose;
 static int g_exit_after_ckpt;
-static ULONGLONG g_arena_base;
-static ULONGLONG g_arena_end;
-static ULONGLONG g_stack_limit;
-static ULONGLONG g_stack_base;
 
 static char   g_app_path[MAX_PATH];
 static char   g_ckpt_path[MAX_PATH];
@@ -29,21 +25,10 @@ static void app_returned(void)
     ExitProcess(2);
 }
 
-static int setup_app_stack(void)
-{
-    g_stack_limit = g_arena_base + APP_STACK_OFF;
-    g_stack_base  = g_stack_limit + APP_STACK_SIZE;
-    if (!VirtualAlloc((LPVOID)g_stack_limit, (SIZE_T)APP_STACK_SIZE,
-                      MEM_COMMIT, PAGE_READWRITE))
-        return 0;
-    return 1;
-}
-
 static void enter_app_on_arena_stack(ULONGLONG entry)
 {
-    // The app's entry needs rsp ending in 8, as after a call, and writes up to
-    // 32 bytes above it; 256 below the top satisfies both.
-    ULONGLONG top = g_stack_base - 256;
+    // Entry expects rsp ending in 8 and writes up to 32 bytes above it.
+    ULONGLONG top = ARENA_BASE + APP_STACK_OFF + APP_STACK_SIZE - 256;
     ULONGLONG rsp = top - 8;
     *(ULONGLONG *)rsp = (ULONGLONG)app_returned;
 
@@ -140,7 +125,7 @@ static int map_crt_copy(Image *img, ULONGLONG off, int app_local_first)
     int found = app_local_first && app_dir_path(path, sizeof path, img->name)
                 && GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
     if (!found && !system_dir_path(path, sizeof path, img->name)) return 0;
-    return loader_map(img, path, g_arena_base + off);
+    return loader_map(img, path, ARENA_BASE + off);
 }
 
 int main(int argc, char **argv)
@@ -174,10 +159,8 @@ int main(int argc, char **argv)
                 (void *)arena, GetLastError());
         return 1;
     }
-    g_arena_base = ARENA_BASE;
-    g_arena_end  = ARENA_BASE + ARENA_SIZE;
     VLOG("arena   0x%llX-0x%llX  %llu GB reserved\n",
-         g_arena_base, g_arena_end, ARENA_SIZE >> 30);
+         ARENA_BASE, ARENA_BASE + ARENA_SIZE, ARENA_SIZE >> 30);
 
     if (!loader_map(&g_app, g_app_path, ARENA_BASE)) return 1;
     if (g_app.nt->OptionalHeader.SizeOfImage > APP_STACK_OFF) {
@@ -193,48 +176,18 @@ int main(int argc, char **argv)
         g_crt_copies[g_n_crt++] = &g_vcrt;
     }
 
-    ULONGLONG app_end = (ULONGLONG)g_app.base + g_app.nt->OptionalHeader.SizeOfImage;
-    if (!setup_app_stack()) {
-        fprintf(stderr, "launch: setup_app_stack failed, err=%lu\n", GetLastError());
+    if (!VirtualAlloc((LPVOID)(ARENA_BASE + APP_STACK_OFF), (SIZE_T)APP_STACK_SIZE,
+                      MEM_COMMIT, PAGE_READWRITE)) {
+        fprintf(stderr, "launch: app stack commit failed, err=%lu\n", GetLastError());
         return 1;
     }
 
-    HANDLE app_thread = NULL;
-    if (!DuplicateHandle(GetCurrentProcess(), GetCurrentThread(),
-                         GetCurrentProcess(), &app_thread,
-                         THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, 0)) {
-        fprintf(stderr, "launch: DuplicateHandle failed, err=%lu\n", GetLastError());
-        return 1;
-    }
-
-    winckpt_arena a;
-    memset(&a, 0, sizeof a);
-    a.base        = g_arena_base;
-    a.end         = g_arena_end;
-    a.heap_start  = g_arena_base + HEAP_OFF;
-    a.heap_end    = g_arena_end;
-    a.stack_limit = g_stack_limit;
-    a.stack_base  = g_stack_base;
-    a.app_base    = (ULONGLONG)g_app.base;
-    a.app_end     = app_end;
-    a.emu_at      = g_arena_base + EMU_OFF;
-    a.app_thread  = app_thread;
-    a.verbose     = g_verbose;
-    a.exit_after_ckpt = g_exit_after_ckpt;
-    a.crt         = g_crt_copies;
-    a.n_crt       = g_n_crt;
-    a.app         = &g_app;
-    a.app_path    = g_app_path;
-    a.ckpt_path   = g_ckpt_path;
-    a.cmdline     = cmdline;
+    winckpt_args a = { g_verbose, g_exit_after_ckpt, g_crt_copies, g_n_crt, &g_app,
+                       g_app_path, g_ckpt_path, cmdline };
     if (!winckpt_init(&a)) {
         fprintf(stderr, "launch: winckpt_init failed\n");
         return 1;
     }
-
-    for (int i = 0; i < g_n_crt; i++)
-        if (!winckpt_fill(g_crt_copies[i], g_crt_copies, g_n_crt)) return 1;
-    if (!winckpt_fill(&g_app, g_crt_copies, g_n_crt)) return 1;
 
     for (int i = 0; i < g_n_crt; i++)
         if (!loader_dll_main(g_crt_copies[i], DLL_PROCESS_ATTACH)) return 1;

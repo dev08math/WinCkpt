@@ -27,10 +27,13 @@
 
   <ItemGroup>
     <ClCompile Include="arena.c" />
+    <ClCompile Include="outside.c" />
+    <ClCompile Include="arena_hooks.c" />
   </ItemGroup>
 
   <ItemGroup>
     <ClInclude Include="$(RepoRoot)include\arena.h" />
+    <ClInclude Include="$(RepoRoot)include\hook.h" />
     <ClInclude Include="$(RepoRoot)include\winckpt_api.h" />
     <ClInclude Include="$(RepoRoot)include\ckpt_format.h" />
     <ClInclude Include="$(RepoRoot)include\log.h" />

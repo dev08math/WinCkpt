@@ -7,11 +7,11 @@
 #include "ckpt_format.h"
 #include "arena.h"
 #include "boundary.h"
+#include "handles.h"
 #include "winckpt_api.h"
 #include "log.h"
 
-static char g_app_path[MAX_PATH];
-static char g_ckpt_path[MAX_PATH];
+static winckpt_args g_args;
 
 WINCKPT_API void snapshot_free(Snapshot *s)
 {
@@ -21,17 +21,15 @@ WINCKPT_API void snapshot_free(Snapshot *s)
     s->bytes = NULL;
 }
 
-static int snapshot_arena(Snapshot *s, ULONGLONG start, ULONGLONG stop,
-                          ULONGLONG *vq_high)
+static int snapshot_arena(Snapshot *s)
 {
     memset(s, 0, sizeof(*s));
-    s->arena_start = start;
-    *vq_high = start;
+    s->arena_start = g_arena.base;
 
     for (int pass = 0; pass < 2; pass++) {
         ULONGLONG n = 0;
         s->total = 0;
-        for (ULONGLONG a = start; a < stop; ) {
+        for (ULONGLONG a = g_arena.base; a < g_arena.end; ) {
             MEMORY_BASIC_INFORMATION mbi;
             if (VirtualQuery((LPCVOID)a, &mbi, sizeof(mbi)) != sizeof(mbi)) {
                 fprintf(stderr, "snapshot: VirtualQuery(0x%llX) failed, err=%lu\n",
@@ -39,21 +37,19 @@ static int snapshot_arena(Snapshot *s, ULONGLONG start, ULONGLONG stop,
                 return 0;
             }
             ULONGLONG rend = (ULONGLONG)mbi.BaseAddress + mbi.RegionSize;
-            if (rend > stop) rend = stop;
+            if (rend > g_arena.end) rend = g_arena.end;
 
             if (mbi.State == MEM_COMMIT) {
                 if (pass == 1) {
                     RegionRec *r = &s->rg[n];
-                    r->base    = a;
-                    r->size    = rend - a;
-                    r->protect = mbi.Protect;
-                    r->kind    = (a >= g_arena.stack_limit && a < g_arena.stack_base)
-                                     ? REGION_STACK : REGION_PLAIN;
-                    r->off     = s->total;
+                    r->base = a;
+                    r->size = rend - a;
+                    r->kind = (a >= g_arena.stack_limit && a < g_arena.stack_base)
+                                  ? REGION_STACK : REGION_PLAIN;
+                    r->off  = s->total;
                 }
                 s->total += rend - a;
                 n++;
-                if (rend > *vq_high) *vq_high = rend;
             }
             a = rend;
         }
@@ -72,10 +68,6 @@ static int snapshot_arena(Snapshot *s, ULONGLONG start, ULONGLONG stop,
     return 1;
 }
 
-// TODO: the writer emits one fixed layout and only checks that each WriteFile
-// returned the byte count. Needs a version field the reader dispatches on, and
-// a write to a temp file renamed on success so a failed write cannot leave a
-// half-written checkpoint in place of a good one.
 static int write_ckpt(const char *path, const Snapshot *s, ULONGLONG *out_bytes)
 {
     HANDLE h = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
@@ -88,8 +80,7 @@ static int write_ckpt(const char *path, const Snapshot *s, ULONGLONG *out_bytes)
     DWORD got = 0;
     int ok = 1;
 
-    ULONGLONG hdr[5] = { CKPT_MAGIC, s->arena_start, s->count,
-                         s->context_present, s->total };
+    ULONGLONG hdr[4] = { CKPT_MAGIC, s->arena_start, s->count, s->total };
     ok = WriteFile(h, hdr, sizeof(hdr), &got, NULL) && got == sizeof(hdr);
     written += got;
     if (ok) {
@@ -99,8 +90,7 @@ static int write_ckpt(const char *path, const Snapshot *s, ULONGLONG *out_bytes)
     }
 
     for (ULONGLONG i = 0; ok && i < s->count; i++) {
-        ULONGLONG rec[4] = { s->rg[i].base, s->rg[i].size,
-                             s->rg[i].protect, s->rg[i].kind };
+        ULONGLONG rec[3] = { s->rg[i].base, s->rg[i].size, s->rg[i].kind };
         ok = WriteFile(h, rec, sizeof(rec), &got, NULL) && got == sizeof(rec);
         written += got;
         if (!ok) break;
@@ -109,15 +99,9 @@ static int write_ckpt(const char *path, const Snapshot *s, ULONGLONG *out_bytes)
         written += got;
     }
 
-    if (ok && s->context_present) {
-        ULONGLONG tag = TAG_CONTEXT;
-        ok = WriteFile(h, &tag, sizeof(tag), &got, NULL) && got == sizeof(tag);
+    if (ok) {
+        ok = WriteFile(h, &s->ctx, sizeof(s->ctx), &got, NULL) && got == sizeof(s->ctx);
         written += got;
-        if (ok) {
-            ok = WriteFile(h, &s->ctx, sizeof(s->ctx), &got, NULL)
-                 && got == sizeof(s->ctx);
-            written += got;
-        }
     }
     if (!ok) fprintf(stderr, "write_ckpt: WriteFile failed, err=%lu\n", GetLastError());
     CloseHandle(h);
@@ -127,7 +111,7 @@ static int write_ckpt(const char *path, const Snapshot *s, ULONGLONG *out_bytes)
 
 static int parse_ckpt(const BYTE *p, const BYTE *end, Snapshot *s)
 {
-    ULONGLONG hdr[5];
+    ULONGLONG hdr[4];
     if ((ULONGLONG)(end - p) < sizeof(hdr)) {
         fprintf(stderr, "ckpt_read: truncated header\n");
         return 0;
@@ -138,10 +122,9 @@ static int parse_ckpt(const BYTE *p, const BYTE *end, Snapshot *s)
         fprintf(stderr, "ckpt_read: bad magic 0x%llX\n", hdr[0]);
         return 0;
     }
-    s->arena_start     = hdr[1];
-    s->count           = hdr[2];
-    s->context_present = hdr[3];
-    s->total           = hdr[4];
+    s->arena_start = hdr[1];
+    s->count       = hdr[2];
+    s->total       = hdr[3];
 
     if ((ULONGLONG)(end - p) < sizeof(s->app_path)) {
         fprintf(stderr, "ckpt_read: truncated app path\n");
@@ -154,7 +137,7 @@ static int parse_ckpt(const BYTE *p, const BYTE *end, Snapshot *s)
         return 0;
     }
 
-    ULONGLONG rec[4];
+    ULONGLONG rec[3];
     if (s->count > (ULONGLONG)(end - p) / sizeof(rec) || s->total > (ULONGLONG)(end - p)) {
         fprintf(stderr, "ckpt_read: %llu regions, %llu bytes: larger than the file\n",
                 s->count, s->total);
@@ -176,11 +159,15 @@ static int parse_ckpt(const BYTE *p, const BYTE *end, Snapshot *s)
         memcpy(rec, p, sizeof(rec));
         p += sizeof(rec);
         RegionRec *r = &s->rg[i];
-        r->base    = rec[0];
-        r->size    = rec[1];
-        r->protect = (DWORD)rec[2];
-        r->kind    = (DWORD)rec[3];
-        r->off     = off;
+        r->base = rec[0];
+        r->size = rec[1];
+        r->kind = rec[2];
+        r->off  = off;
+        if (r->base < ARENA_BASE || r->size > ARENA_BASE + ARENA_SIZE - r->base) {
+            fprintf(stderr, "ckpt_read: region %llu 0x%llX+0x%llX outside the arena\n",
+                    i, r->base, r->size);
+            return 0;
+        }
         if (r->size > (ULONGLONG)(end - p) || r->size > s->total - off) {
             fprintf(stderr, "ckpt_read: truncated payload of region %llu\n", i);
             return 0;
@@ -194,25 +181,12 @@ static int parse_ckpt(const BYTE *p, const BYTE *end, Snapshot *s)
         return 0;
     }
 
-    if (s->context_present) {
-        ULONGLONG tag;
-        if ((ULONGLONG)(end - p) < sizeof(tag) + sizeof(CONTEXT)) {
-            fprintf(stderr, "ckpt_read: truncated context\n");
-            return 0;
-        }
-        memcpy(&tag, p, sizeof(tag));
-        p += sizeof(tag);
-        if (tag != TAG_CONTEXT) {
-            fprintf(stderr, "ckpt_read: bad context tag 0x%llX\n", tag);
-            return 0;
-        }
-        memcpy(&s->ctx, p, sizeof(CONTEXT));
-        p += sizeof(CONTEXT);
-    }
-    if (p != end) {
-        fprintf(stderr, "ckpt_read: %llu trailing bytes\n", (ULONGLONG)(end - p));
+    if ((ULONGLONG)(end - p) != sizeof(CONTEXT)) {
+        fprintf(stderr, "ckpt_read: %llu bytes after the regions, a context is %zu\n",
+                (ULONGLONG)(end - p), sizeof(CONTEXT));
         return 0;
     }
+    memcpy(&s->ctx, p, sizeof(CONTEXT));
     return 1;
 }
 
@@ -230,54 +204,26 @@ WINCKPT_API int ckpt_read(const char *path, Snapshot *s)
 
 static int do_checkpoint(const CONTEXT *ctx)
 {
-    ULONGLONG vq_high = 0;
     Snapshot snap;
 
-    if (!snapshot_arena(&snap, g_arena.base, g_arena.end, &vq_high)) {
+    if (!arena_outside_ok()) return 0;
+    if (!snapshot_arena(&snap)) {
         snapshot_free(&snap);
         return 0;
     }
-    strcpy(snap.app_path, g_app_path);
+    strcpy(snap.app_path, g_args.app_path);
+    snap.ctx = *ctx;
 
-    if (ctx) {
-        snap.ctx = *ctx;
-        snap.context_present = 1;
-    }
-
-    for (ULONGLONG i = 0; i < snap.count; i++)
-        if (g_verbose
-            || snap.rg[i].base < g_arena.base
-            || snap.rg[i].base + snap.rg[i].size > g_arena.end)
-        printf("ckpt: region[%llu]  [0x%llX .. 0x%llX)  %8llu bytes  %-5s  prot=0x%lX%s\n",
-               i, snap.rg[i].base, snap.rg[i].base + snap.rg[i].size,
-               snap.rg[i].size,
-               snap.rg[i].kind == REGION_STACK ? "STACK" : "PLAIN",
-               snap.rg[i].protect,
-               (snap.rg[i].base >= g_arena.base
-                && snap.rg[i].base + snap.rg[i].size <= g_arena.end)
-                   ? "" : "  *** OUTSIDE ARENA ***");
-
-    VLOG("ckpt: heap_ctl.committed=0x%llX, VirtualQuery high-water=0x%llX\n",
-         g_ctl->committed, vq_high);
-
-    char sizes[128];
-    sizes[0] = 0;
-    for (ULONGLONG i = 0; i < snap.count; i++) {
-        char one[48];
-        sprintf(one, " %s %llu", snap.rg[i].kind == REGION_STACK ? "stack"
-                : snap.rg[i].base == g_arena.app_base ? "image" : "heap",
-                snap.rg[i].size);
-        if (strlen(sizes) + strlen(one) < sizeof sizes) strcat(sizes, one);
-    }
+    for (ULONGLONG i = 0; g_verbose && i < snap.count; i++)
+        printf("ckpt: region[%llu]  [0x%llX .. 0x%llX)  %8llu bytes  %s\n",
+               i, snap.rg[i].base, snap.rg[i].base + snap.rg[i].size, snap.rg[i].size,
+               snap.rg[i].kind == REGION_STACK ? "STACK" : "PLAIN");
 
     ULONGLONG fsize = 0;
-    if (!write_ckpt(g_ckpt_path, &snap, &fsize)) { snapshot_free(&snap); return 0; }
-
-    VLOG("mem     %llu regions:%s\n", snap.count, sizes);
-    VLOG("file    %s  %llu bytes\n", g_ckpt_path, fsize);
-
+    int ok = write_ckpt(g_args.ckpt_path, &snap, &fsize);
+    if (ok) VLOG("file    %s  %llu bytes\n", g_args.ckpt_path, fsize);
     snapshot_free(&snap);
-    return 1;
+    return ok;
 }
 
 static void capture_context(CONTEXT *out, int *frames_popped)
@@ -321,18 +267,20 @@ WINCKPT_API void winckpt_checkpoint(void)
            ctx.Rip, rip_ok ? "(app code)" : "(NOT APP CODE)",
            ctx.Rsp, rsp_ok ? "(app stack)" : "(NOT APP STACK)",
            rsp_match ? "" : "  UNWIND MISMATCH");
-    if (!rip_ok || !rsp_ok || !rsp_match)
-        printf("ckpt: app image [0x%llX..0x%llX) arena stack [0x%llX..0x%llX) "
+    int written = 0;
+    if (!rip_ok || !rsp_ok || !rsp_match) {
+        printf("ckpt: refused, caller is not app code: Rip=0x%llX Rsp=0x%llX, "
+               "app image [0x%llX..0x%llX) arena stack [0x%llX..0x%llX) "
                "expected Rsp=0x%llX, unwound %d frame(s)\n",
-               g_arena.app_base, g_arena.app_end,
+               ctx.Rip, ctx.Rsp, g_arena.app_base, g_arena.app_end,
                g_arena.stack_limit, g_arena.stack_base,
                expect_rsp, frames);
-    else
+    } else {
         VLOG("ckpt: unwound %d frame(s) to reach the app\n", frames);
-
-    int written = do_checkpoint(&ctx);
-    if (g_arena.exit_after_ckpt) {
-        printf("ckpt: %s %s, exiting (-k)\n", g_ckpt_path, written ? "written" : "NOT written");
+        written = do_checkpoint(&ctx);
+    }
+    if (g_args.exit_after_ckpt) {
+        printf("ckpt: %s %s, exiting (-k)\n", g_args.ckpt_path, written ? "written" : "NOT written");
         TerminateProcess(GetCurrentProcess(), written ? 0 : 1);
     }
     DLOG("--- app resumes ---\n");
@@ -350,75 +298,67 @@ static void on_app_exit(UINT code)
         printf("FAIL    exit code %u or arena allocator control block not sane\n", code);
 }
 
-WINCKPT_API int winckpt_fill(Image *img, Image **crt, int n_crt)
+static int fill(Image *img)
 {
-    if (!loader_fill_imports(img, crt, n_crt, boundary_hook)) return 0;
+    if (!loader_fill_imports(img, g_args.crt, g_args.n_crt, boundary_hook)) return 0;
     boundary_report(img->name);
     return loader_protect(img);
 }
 
+static int fill_all(void)
+{
+    for (int i = 0; i < g_args.n_crt; i++)
+        if (!fill(g_args.crt[i])) return 0;
+    return fill(g_args.app);
+}
+
+static void begin(const winckpt_args *a, winckpt_arena *layout)
+{
+    g_args    = *a;
+    g_verbose = a->verbose;
+    setvbuf(stdout, NULL, _IONBF, 0);
+
+    layout->base        = ARENA_BASE;
+    layout->end         = ARENA_BASE + ARENA_SIZE;
+    layout->heap_start  = ARENA_BASE + HEAP_OFF;
+    layout->stack_limit = ARENA_BASE + APP_STACK_OFF;
+    layout->stack_base  = layout->stack_limit + APP_STACK_SIZE;
+    layout->app_base    = (ULONGLONG)a->app->base;
+    layout->app_end     = layout->app_base + a->app->nt->OptionalHeader.SizeOfImage;
+    layout->emu_at      = ARENA_BASE + EMU_OFF;
+    process_on_exit(a->crt, a->n_crt, a->app, on_app_exit);
+}
+
+WINCKPT_API int winckpt_init(const winckpt_args *a)
+{
+    winckpt_arena layout;
+    begin(a, &layout);
+    if (!arena_init(&layout)) {
+        fprintf(stderr, "winckpt_init: arena_init failed, err=%lu\n", GetLastError());
+        return 0;
+    }
+    if (!boundary_init(layout.emu_at, a->cmdline)) return 0;
+    VLOG("winckpt: heap at 0x%llX, ctl reserve %llu bytes, emu at 0x%llX\n",
+         layout.heap_start, (ULONGLONG)HEAP_CTL_RESERVE, layout.emu_at);
+    return fill_all();
+}
+
+WINCKPT_API int winckpt_adopt(const winckpt_args *a)
+{
+    winckpt_arena layout;
+    begin(a, &layout);
+    arena_adopt(&layout);
+    if (!boundary_adopt(layout.emu_at)) return 0;
+    VLOG("winckpt: adopted heap at 0x%llX (cur=0x%llX), emu at 0x%llX\n",
+         layout.heap_start, g_ctl->cur, layout.emu_at);
+    return fill_all() && handles_rebind_std(g_args.crt[0]);
+}
+
 WINCKPT_API void winckpt_enter(CONTEXT *ctx)
 {
-    // The TEB still points at this thread's original stack. Repoint it at the
-    // arena stack so the CRT's stack checks and exception dispatch look at the
-    // right place.
+    // __chkstk and exception dispatch read the stack bounds from the TEB.
     NT_TIB *tib = (NT_TIB *)NtCurrentTeb();
     tib->StackBase  = (void *)g_arena.stack_base;
     tib->StackLimit = (void *)g_arena.stack_limit;
     RtlRestoreContext(ctx, NULL);
-}
-
-WINCKPT_API int winckpt_rebind_std(const Image *ucrt)
-{
-    return boundary_rebind_std(ucrt);
-}
-
-static int set_paths(const winckpt_arena *a)
-{
-    if (strlen(a->app_path) >= sizeof g_app_path || strlen(a->ckpt_path) >= sizeof g_ckpt_path) {
-        fprintf(stderr, "winckpt: app or checkpoint path is %d characters or longer\n", MAX_PATH);
-        return 0;
-    }
-    strcpy(g_app_path, a->app_path);
-    strcpy(g_ckpt_path, a->ckpt_path);
-    return 1;
-}
-
-WINCKPT_API int winckpt_init(const winckpt_arena *a)
-{
-    g_verbose = a->verbose;
-    setvbuf(stdout, NULL, _IONBF, 0);
-
-    if (!arena_init(a)) {
-        fprintf(stderr, "winckpt_init: arena_init failed, err=%lu\n", GetLastError());
-        return 0;
-    }
-    if (!set_paths(a)) return 0;
-    if (!boundary_init(a->emu_at, a->cmdline)) return 0;
-    boundary_on_exit(a->crt, a->n_crt, a->app, on_app_exit);
-
-    VLOG("winckpt: heap at 0x%llX, ctl reserve %llu bytes, emu at 0x%llX\n",
-         g_arena.heap_start, (ULONGLONG)HEAP_CTL_RESERVE, a->emu_at);
-    return 1;
-}
-
-WINCKPT_API int winckpt_adopt(const winckpt_arena *a)
-{
-    g_verbose = a->verbose;
-    setvbuf(stdout, NULL, _IONBF, 0);
-
-    if (!set_paths(a)) return 0;
-    arena_adopt(a);
-    if (!boundary_adopt(a->emu_at)) return 0;
-    boundary_on_exit(a->crt, a->n_crt, a->app, on_app_exit);
-
-    VLOG("winckpt: adopted heap at 0x%llX (cur=0x%llX), emu at 0x%llX\n",
-         g_arena.heap_start, g_ctl->cur, a->emu_at);
-    return 1;
-}
-
-BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
-{
-    (void)inst; (void)reason; (void)reserved;
-    return TRUE;
 }

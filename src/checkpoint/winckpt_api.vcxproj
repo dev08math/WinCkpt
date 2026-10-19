@@ -39,6 +39,9 @@
     <ClInclude Include="$(RepoRoot)include\winckpt_api.h" />
     <ClInclude Include="$(RepoRoot)include\arena.h" />
     <ClInclude Include="$(RepoRoot)include\boundary.h" />
+    <ClInclude Include="$(RepoRoot)include\handles.h" />
+    <ClInclude Include="$(RepoRoot)include\process.h" />
+    <ClInclude Include="$(RepoRoot)include\modules.h" />
     <ClInclude Include="$(RepoRoot)include\loader.h" />
     <ClInclude Include="$(RepoRoot)include\ckpt_format.h" />
     <ClInclude Include="$(RepoRoot)include\log.h" />
@@ -47,6 +50,9 @@
   <ItemGroup>
     <ProjectReference Include="$(RepoRoot)src\arena\arena.vcxproj" />
     <ProjectReference Include="$(RepoRoot)src\boundary\boundary.vcxproj" />
+    <ProjectReference Include="$(RepoRoot)src\handles\handles.vcxproj" />
+    <ProjectReference Include="$(RepoRoot)src\process\process.vcxproj" />
+    <ProjectReference Include="$(RepoRoot)src\modules\modules.vcxproj" />
     <ProjectReference Include="$(RepoRoot)src\loader\loader.vcxproj" />
   </ItemGroup>
 

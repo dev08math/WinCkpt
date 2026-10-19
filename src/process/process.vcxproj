@@ -1,0 +1,42 @@
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{A1E0000A-0000-4000-8000-00000000A00A}</ProjectGuid>
+    <RootNamespace>process</RootNamespace>
+    <TargetName>process</TargetName>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+
+  <ItemGroup>
+    <ClCompile Include="process.c" />
+    <ClCompile Include="process_hooks.c" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ClInclude Include="$(RepoRoot)include\process.h" />
+    <ClInclude Include="$(RepoRoot)include\hook.h" />
+    <ClInclude Include="$(RepoRoot)include\arena.h" />
+    <ClInclude Include="$(RepoRoot)include\loader.h" />
+  </ItemGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+
+</Project>
