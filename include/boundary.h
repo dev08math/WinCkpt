@@ -5,10 +5,12 @@
 
 #include "process.h"
 #include "modules.h"
+#include "handles.h"
 
 typedef struct Emu {
     ProcessEmu process;
     ModulesEmu modules;
+    HandlesEmu handles;
 } Emu;
 
 int   boundary_init(ULONGLONG emu_at, const WCHAR *cmdline);

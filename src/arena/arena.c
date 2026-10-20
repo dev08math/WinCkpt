@@ -6,7 +6,6 @@
 #include "arena.h"
 #include "log.h"
 
-int           g_verbose;
 winckpt_arena g_arena;
 heap_ctl     *g_ctl;
 
@@ -58,7 +57,7 @@ void arena_dump_ctl(const char *when)
            when, g_ctl->cur, g_ctl->committed, g_ctl->free_head);
 }
 
-void *arena_malloc(size_t n)
+static void *take_block(size_t n)
 {
     size_t need = (n + 15) & ~(size_t)15;
     if (need == 0) need = 16;
@@ -69,24 +68,26 @@ void *arena_malloc(size_t n)
             if (prev) prev->next = cur->next;
             else      g_ctl->free_head = (ULONGLONG)cur->next;
             cur->used = n;
-            void *p = (char *)cur + HDR;
-            g_ctl->n_malloc++;
-            VLOG("  [heap] malloc(%zu) reuse -> 0x%p\n", n, p);
-            return p;
+            return (char *)cur + HDR;
         }
     }
 
     ULONGLONG at = g_ctl->cur;
     if (!ensure_committed(at + HDR + need)) {
-        printf("arena: heap OOM on malloc(%zu)\n", n);
+        fprintf(stderr, "arena: heap out of memory for %zu bytes\n", n);
         return NULL;
     }
     Block *b = (Block *)at;
     b->size = need;
     b->used = n;
     g_ctl->cur = at + HDR + need;
-    void *p = (char *)b + HDR;
-    g_ctl->n_malloc++;
+    return (char *)b + HDR;
+}
+
+void *arena_malloc(size_t n)
+{
+    void *p = take_block(n);
+    if (p) g_ctl->n_malloc++;
     VLOG("  [heap] malloc(%zu) -> 0x%p\n", n, p);
     return p;
 }
@@ -125,8 +126,9 @@ void *arena_calloc(size_t count, size_t sz)
 {
     size_t total = count * sz;
     if (count != 0 && total / count != sz) return NULL;
-    void *p = arena_malloc(total);
-    if (p) memset(p, 0, total);
+    void *p = take_block(total);
+    if (!p) return NULL;
+    memset(p, 0, total);
     g_ctl->n_calloc++;
     VLOG("  [heap] calloc(%zu,%zu) -> 0x%p\n", count, sz, p);
     return p;

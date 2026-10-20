@@ -7,10 +7,10 @@
 #include "ckpt_format.h"
 #include "arena.h"
 #include "boundary.h"
-#include "handles.h"
 #include "winckpt_api.h"
 #include "log.h"
 
+int                 g_verbose;
 static winckpt_args g_args;
 
 WINCKPT_API void snapshot_free(Snapshot *s)
@@ -68,6 +68,19 @@ static int snapshot_arena(Snapshot *s)
     return 1;
 }
 
+static int write_all(HANDLE h, const void *buf, ULONGLONG n, ULONGLONG *written)
+{
+    const BYTE *p = (const BYTE *)buf;
+    while (n > 0) {
+        DWORD want = n > (1u << 30) ? (1u << 30) : (DWORD)n, got = 0;
+        if (!WriteFile(h, p, want, &got, NULL) || got != want) return 0;
+        p += got;
+        n -= got;
+        *written += got;
+    }
+    return 1;
+}
+
 static int write_ckpt(const char *path, const Snapshot *s, ULONGLONG *out_bytes)
 {
     HANDLE h = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
@@ -77,32 +90,15 @@ static int write_ckpt(const char *path, const Snapshot *s, ULONGLONG *out_bytes)
         return 0;
     }
     ULONGLONG written = 0;
-    DWORD got = 0;
-    int ok = 1;
-
     ULONGLONG hdr[4] = { CKPT_MAGIC, s->arena_start, s->count, s->total };
-    ok = WriteFile(h, hdr, sizeof(hdr), &got, NULL) && got == sizeof(hdr);
-    written += got;
-    if (ok) {
-        ok = WriteFile(h, s->app_path, sizeof(s->app_path), &got, NULL)
-             && got == sizeof(s->app_path);
-        written += got;
-    }
-
+    int ok = write_all(h, hdr, sizeof hdr, &written)
+          && write_all(h, s->app_path, sizeof s->app_path, &written);
     for (ULONGLONG i = 0; ok && i < s->count; i++) {
         ULONGLONG rec[3] = { s->rg[i].base, s->rg[i].size, s->rg[i].kind };
-        ok = WriteFile(h, rec, sizeof(rec), &got, NULL) && got == sizeof(rec);
-        written += got;
-        if (!ok) break;
-        ok = WriteFile(h, s->bytes + s->rg[i].off, (DWORD)s->rg[i].size, &got, NULL)
-             && got == (DWORD)s->rg[i].size;
-        written += got;
+        ok = write_all(h, rec, sizeof rec, &written)
+          && write_all(h, s->bytes + s->rg[i].off, s->rg[i].size, &written);
     }
-
-    if (ok) {
-        ok = WriteFile(h, &s->ctx, sizeof(s->ctx), &got, NULL) && got == sizeof(s->ctx);
-        written += got;
-    }
+    ok = ok && write_all(h, &s->ctx, sizeof s->ctx, &written);
     if (!ok) fprintf(stderr, "write_ckpt: WriteFile failed, err=%lu\n", GetLastError());
     CloseHandle(h);
     *out_bytes = written;
@@ -206,7 +202,7 @@ static int do_checkpoint(const CONTEXT *ctx)
 {
     Snapshot snap;
 
-    if (!arena_outside_ok()) return 0;
+    if (!arena_outside_ok() || !handles_save()) return 0;
     if (!snapshot_arena(&snap)) {
         snapshot_free(&snap);
         return 0;
@@ -214,10 +210,10 @@ static int do_checkpoint(const CONTEXT *ctx)
     strcpy(snap.app_path, g_args.app_path);
     snap.ctx = *ctx;
 
-    for (ULONGLONG i = 0; g_verbose && i < snap.count; i++)
-        printf("ckpt: region[%llu]  [0x%llX .. 0x%llX)  %8llu bytes  %s\n",
-               i, snap.rg[i].base, snap.rg[i].base + snap.rg[i].size, snap.rg[i].size,
-               snap.rg[i].kind == REGION_STACK ? "STACK" : "PLAIN");
+    for (ULONGLONG i = 0; i < snap.count; i++)
+        VLOG("ckpt: region[%llu]  [0x%llX .. 0x%llX)  %8llu bytes  %s\n",
+             i, snap.rg[i].base, snap.rg[i].base + snap.rg[i].size, snap.rg[i].size,
+             snap.rg[i].kind == REGION_STACK ? "STACK" : "PLAIN");
 
     ULONGLONG fsize = 0;
     int ok = write_ckpt(g_args.ckpt_path, &snap, &fsize);
@@ -351,7 +347,7 @@ WINCKPT_API int winckpt_adopt(const winckpt_args *a)
     if (!boundary_adopt(layout.emu_at)) return 0;
     VLOG("winckpt: adopted heap at 0x%llX (cur=0x%llX), emu at 0x%llX\n",
          layout.heap_start, g_ctl->cur, layout.emu_at);
-    return fill_all() && handles_rebind_std(g_args.crt[0]);
+    return fill_all();
 }
 
 WINCKPT_API void winckpt_enter(CONTEXT *ctx)

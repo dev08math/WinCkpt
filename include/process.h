@@ -28,5 +28,7 @@ void        process_detach(UINT code);
 
 extern const Hook process_hooks[];
 extern const int  process_n_hooks;
+extern const char *const process_unhandled[];
+extern const int         process_n_unhandled;
 
 #endif

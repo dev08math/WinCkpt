@@ -186,7 +186,7 @@ int loader_map(Image *img, const char *path, ULONGLONG at)
         memcpy(base + sec[i].VirtualAddress, file + sec[i].PointerToRawData, sec[i].SizeOfRawData);
     free(file);
 
-    loader_attach(img, at, size_image);
+    if (!loader_attach(img, at, size_image)) return 0;
     ULONGLONG delta = at - img->nt->OptionalHeader.ImageBase;
     if (delta != 0 && !apply_relocations(img, delta)) return 0;
     img->nt->OptionalHeader.ImageBase = at;

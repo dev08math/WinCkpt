@@ -44,8 +44,8 @@ The combined output is identical to an uninterrupted run.
 ## Status
 
 WinCkpt checkpoints and restarts single-threaded C programs, including after a reboot; a
-restarted program can checkpoint again. Open files and other kernel objects,
-multithreading, and an external checkpoint trigger are in progress.
+restarted program can checkpoint again. Open files, pipes, events, semaphores and mutexes
+come back at restart. Multithreading and an external checkpoint trigger are in progress.
 
 ## References
 

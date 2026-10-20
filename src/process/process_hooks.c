@@ -123,3 +123,11 @@ const Hook process_hooks[] = {
     { "GetCommandLineW", (void *)hook_GetCommandLineW },
 };
 const int process_n_hooks = sizeof process_hooks / sizeof process_hooks[0];
+
+const char *const process_unhandled[] = {
+    "CreateThread", "CreateRemoteThread", "CreateRemoteThreadEx",
+    "EncodePointer",
+    "SetCurrentDirectoryA", "SetCurrentDirectoryW",
+    "SetEnvironmentVariableA", "SetEnvironmentVariableW",
+};
+const int process_n_unhandled = sizeof process_unhandled / sizeof process_unhandled[0];

@@ -95,18 +95,18 @@ static int attach_images(const Snapshot *s)
     return 1;
 }
 
-
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
 
     const char *ckpt = NULL;
     int bad = 0;
-    for (int i = 1; i < argc; i++)
+    for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-v")) g_verbose = 1;
         else if (!strcmp(argv[i], "-k")) g_exit_after_ckpt = 1;
         else if (argv[i][0] != '-' && !ckpt) ckpt = argv[i];
         else bad = 1;
+    }
     size_t len = ckpt ? strlen(ckpt) : 0;
     if (bad || len < strlen(CKPT_SUFFIX)
         || _stricmp(ckpt + len - strlen(CKPT_SUFFIX), CKPT_SUFFIX)) {

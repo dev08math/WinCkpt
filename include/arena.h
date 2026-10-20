@@ -59,5 +59,7 @@ int    arena_outside_ok(void);
 
 extern const Hook arena_hooks[];
 extern const int  arena_n_hooks;
+extern const char *const arena_unhandled[];
+extern const int         arena_n_unhandled;
 
 #endif

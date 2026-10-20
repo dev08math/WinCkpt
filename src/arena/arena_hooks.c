@@ -35,20 +35,20 @@ static SIZE_T WINAPI hook_HeapSize(HANDLE heap, DWORD flags, LPCVOID p)
 
 static int is_self(HANDLE process)
 {
-    return process == NULL || GetProcessId(process) == GetCurrentProcessId();
+    return process == GetCurrentProcess() || GetProcessId(process) == GetCurrentProcessId();
 }
 
 static LPVOID WINAPI hook_VirtualAlloc(LPVOID at, SIZE_T n, DWORD type, DWORD prot)
 {
     LPVOID p = VirtualAlloc(at, n, type, prot);
-    if (p && (type & MEM_RESERVE || !at)) arena_outside_record(p, "VirtualAlloc");
+    if (p && ((type & MEM_RESERVE) || !at)) arena_outside_record(p, "VirtualAlloc");
     return p;
 }
 
 static LPVOID WINAPI hook_VirtualAllocEx(HANDLE process, LPVOID at, SIZE_T n, DWORD type, DWORD prot)
 {
     LPVOID p = VirtualAllocEx(process, at, n, type, prot);
-    if (p && is_self(process) && (type & MEM_RESERVE || !at)) arena_outside_record(p, "VirtualAllocEx");
+    if (p && is_self(process) && ((type & MEM_RESERVE) || !at)) arena_outside_record(p, "VirtualAllocEx");
     return p;
 }
 
@@ -61,8 +61,12 @@ static PVOID WINAPI hook_VirtualAlloc2(HANDLE process, PVOID at, SIZE_T n, ULONG
 {
     virtual_alloc2_fn real = (virtual_alloc2_fn)GetProcAddress(
         GetModuleHandleW(L"kernelbase.dll"), "VirtualAlloc2");
+    if (!real) {
+        SetLastError(ERROR_PROC_NOT_FOUND);
+        return NULL;
+    }
     PVOID p = real(process, at, n, type, prot, ext, n_ext);
-    if (p && is_self(process) && (type & MEM_RESERVE || !at)) arena_outside_record(p, "VirtualAlloc2");
+    if (p && is_self(process) && ((type & MEM_RESERVE) || !at)) arena_outside_record(p, "VirtualAlloc2");
     return p;
 }
 
@@ -76,7 +80,7 @@ static BOOL WINAPI hook_VirtualFree(LPVOID at, SIZE_T n, DWORD type)
 static BOOL WINAPI hook_VirtualFreeEx(HANDLE process, LPVOID at, SIZE_T n, DWORD type)
 {
     if (!VirtualFreeEx(process, at, n, type)) return FALSE;
-    if (is_self(process) && type & MEM_RELEASE) arena_outside_forget(at);
+    if (is_self(process) && (type & MEM_RELEASE)) arena_outside_forget(at);
     return TRUE;
 }
 
@@ -254,10 +258,10 @@ static BOOL WINAPI hook_AllocateAndInitializeSid(PSID_IDENTIFIER_AUTHORITY auth,
                                                  DWORD s4, DWORD s5, DWORD s6, DWORD s7, PSID *sid)
 {
     alloc_sid_fn real = (alloc_sid_fn)real_fn(L"advapi32.dll", "AllocateAndInitializeSid");
-    free_sid_fn  free = (free_sid_fn)real_fn(L"advapi32.dll", "FreeSid");
-    if (!real || !free || !real(auth, count, s0, s1, s2, s3, s4, s5, s6, s7, sid)) return FALSE;
+    free_sid_fn  free_sid = (free_sid_fn)real_fn(L"advapi32.dll", "FreeSid");
+    if (!real || !free_sid || !real(auth, count, s0, s1, s2, s3, s4, s5, s6, s7, sid)) return FALSE;
     PSID copy = swap_in(*sid, 8 + 4 * (size_t)((BYTE *)*sid)[1]);
-    free(*sid);
+    free_sid(*sid);
     *sid = copy;
     return copy != NULL;
 }
@@ -335,3 +339,9 @@ const Hook arena_hooks[] = {
       (void *)hook_ConvertStringSecurityDescriptorToSecurityDescriptorA },
 };
 const int arena_n_hooks = sizeof arena_hooks / sizeof arena_hooks[0];
+
+const char *const arena_unhandled[] = {
+    "VirtualAlloc", "VirtualAllocEx", "HeapCreate",
+    "CreateFileMappingA", "CreateFileMappingW", "MapViewOfFile", "MapViewOfFileEx",
+};
+const int arena_n_unhandled = sizeof arena_unhandled / sizeof arena_unhandled[0];

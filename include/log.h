@@ -5,7 +5,7 @@
 
 extern int g_verbose;
 
-#define VLOG(...) if (g_verbose) printf(__VA_ARGS__)
+#define VLOG(...) do { if (g_verbose) printf(__VA_ARGS__); } while (0)
 
 #ifdef _DEBUG
 #define DLOG(...) printf(__VA_ARGS__)

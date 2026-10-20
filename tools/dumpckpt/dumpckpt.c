@@ -29,8 +29,9 @@ int main(int argc, char **argv)
     Snapshot s;
     if (!ckpt_read(argv[1], &s)) return 1;
 
-    printf("header: magic=WCKPT005 arena_start=0x%llX regions=%llu total_bytes=%llu\n",
-           s.arena_start, s.count, s.total);
+    ULONGLONG magic = CKPT_MAGIC;
+    printf("header: magic=%.8s arena_start=0x%llX regions=%llu total_bytes=%llu\n",
+           (const char *)&magic, s.arena_start, s.count, s.total);
     printf("app:    %s\n", s.app_path);
 
     ULONGLONG stack_base = 0, stack_size = 0;
@@ -44,18 +45,18 @@ int main(int argc, char **argv)
     }
 
     printf("\n");
-    if (stack_regions == 1)
+    const CONTEXT *ctx = &s.ctx;
+    if (stack_regions == 1) {
+        ULONGLONG live_lo = ctx->Rsp & ~(PAGE - 1);
         printf("stack region: base=0x%llX size=0x%llX (%llu KB)\n",
                stack_base, stack_size, stack_size / 1024);
-    else
+        printf("live stack extent: [0x%llX .. 0x%llX) = %llu bytes of the %llu captured\n",
+               live_lo, stack_base + stack_size, (stack_base + stack_size) - live_lo, stack_size);
+    } else {
         printf("stack region: %d found (expected exactly 1)\n", stack_regions);
-
-    const CONTEXT *ctx = &s.ctx;
+    }
     printf("context: Rip=0x%llX Rsp=0x%llX Rbp=0x%llX Rbx=0x%llX\n",
            ctx->Rip, ctx->Rsp, ctx->Rbp, ctx->Rbx);
-    ULONGLONG live_lo = ctx->Rsp & ~(PAGE - 1);
-    printf("live stack extent: [0x%llX .. 0x%llX) = %llu bytes of the %llu captured\n",
-           live_lo, stack_base + stack_size, (stack_base + stack_size) - live_lo, stack_size);
 
     ULONGLONG size_image = 0;
     int have_app = app_image_size(&s, &size_image);
